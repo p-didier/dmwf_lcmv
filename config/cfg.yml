@@ -1,0 +1,8 @@
+K: 5      # number of nodes
+Mk: 10    # number of sensors per node (same for all nodes)
+D: 1      # number of target signal channels at every node
+Qd: 3     # number of desired sources in environment
+Qn: 3     # number of noise sources in environment
+N: 10000    # number of samples
+
+seed: 42  # random number generator seed
