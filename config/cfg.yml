@@ -1,8 +1,10 @@
 K: 5      # number of nodes
-Mk: 10    # number of sensors per node (same for all nodes)
+Mk: 3    # number of sensors per node (same for all nodes)
 D: 1      # number of target signal channels at every node
-Qd: 3     # number of desired sources in environment
-Qn: 3     # number of noise sources in environment
+Qd: 1     # number of desired sources in environment
+Qn: 1     # number of noise sources in environment
 N: 10000    # number of samples
+# scmEst: theoretical    # type of SCM estimation method ('theoretical' or 'batch')
+scmEst: batch    # type of SCM estimation method ('theoretical' or 'batch')
 
-seed: 42  # random number generator seed
+seed: 42  # random number generator seed (for 1st MC run)
