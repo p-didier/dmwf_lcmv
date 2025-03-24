@@ -1,4 +1,4 @@
-K: 5      # number of nodes
+K: 8      # number of nodes
 Mk: 10    # number of sensors per node (same for all nodes)
 D: 1      # number of target signal channels at every node
 Qd: 5     # number of desired sources in environment

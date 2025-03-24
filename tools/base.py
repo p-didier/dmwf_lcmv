@@ -24,6 +24,7 @@ class Parameters:
 
     def __post_init__(self):
         np.random.seed(self.seed)
+        self.M = self.Mk * self.K
         assert self.Mk >= self.Qd + self.Qn, "Number of sensors per node must be greater than number of sources."
 
     def load_from_yaml(self, path: str):
