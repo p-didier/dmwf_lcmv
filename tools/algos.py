@@ -70,7 +70,7 @@ class Run:
 
         # Compute theoretical SCMs
         scms = self.compute_theoretical_scms(
-            latd, latn, sn, oMatd, oMatn, QkqMat
+            latd, latn, sn, Amat, Bmat, oMatd, oMatn, QkqMat
         )
 
         # Microphone signals
@@ -110,7 +110,7 @@ class Run:
                     Ru = (y[k] @ y[k].T - y[q] @ y[q].T) / c.N
                 Gam = np.linalg.inv(Ru)
                 # LCMV beamformer
-                Pkq[k][q]['LCMV'] = Gam @ Ryz @ np.linalg.inv(Ryz.T @ Gam @ Ryz)  # (Mk x Qkq)
+                Pkq[k][q]['LCMV'] = Gam @ Ryz @ np.linalg.pinv(Ryz.T @ Gam @ Ryz)  # (Mk x Qkq)
                 
                 # --- dMWF basic definition ---
                 if c.scmEst == 'theoretical':
@@ -242,7 +242,13 @@ class Run:
 
         return msed
         
-    def compute_theoretical_scms(self, latd, latn, sn, oMatd, oMatn, QkqMat):
+    def compute_theoretical_scms(
+            self,
+            latd, latn, sn,
+            Amat, Bmat,
+            oMatd, oMatn,
+            QkqMat
+        ):
         """
         Compute the theoretical SCMs for the given environment.
 
@@ -254,6 +260,10 @@ class Run:
             Noise latent source signals.
         sn : list[np.ndarray]
             Self-noise signals.
+        Amat : list[np.ndarray]
+            Steering matrices for the desired sources.
+        Bmat : list[np.ndarray]
+            Steering matrices for the noise sources.
         oMatd : np.ndarray (Qd x K)
             Observability matrix for the desired sources.
         oMatn : np.ndarray (Qn x K)
@@ -266,50 +276,15 @@ class Run:
         scms : SCMs object
             Theoretical SCMs object.
         """
-        c = self.cfg 
+        c = self.cfg  # alias for convenience
         # Initialize SCMs
         scms = SCMs()
-        # Centralized steering matrices
-        Amat = [np.zeros((c.Mk, c.Qd)) for _ in range(c.K)]
-        Bmat = [np.zeros((c.Mk, c.Qn)) for _ in range(c.K)]
-        for k in range(c.K):
-            # Fill in depending on observability
-            Amat[k][:, oMatd[:, k].astype(bool)] = np.random.randn(
-                c.Mk, np.sum(oMatd[:, k])
-            )
-            Bmat[k][:, oMatn[:, k].astype(bool)] = np.random.randn(
-                c.Mk, np.sum(oMatn[:, k])
-            )
-        # Rearrange the steering matrices colums and latent signal entries to
-        # have the sources that are only observed by one node at the end.
-        allDesIdx = np.arange(c.Qd)
-        iSingd = np.where(np.sum(oMatd, axis=1) == 1)[0]  # indices of desired sources observed by only one node
-        iSingn = np.where(np.sum(oMatn, axis=1) == 1)[0]  # indices of noise sources observed by only one node
-        iMultd = np.delete(allDesIdx, iSingd)
-        iMultn = np.delete(allDesIdx, iSingn)
-        # Rearrange the steering matrices and latent signals
-        latd = np.concatenate((latd[iMultd, :], latd[iSingd, :]), axis=0)
-        latn = np.concatenate((latn[iMultn, :], latn[iSingn, :]), axis=0)
-        for k in range(c.K):
-            Amat[k] = np.concatenate((
-                Amat[k][:, iMultd],
-                Amat[k][:, iSingd]
-            ), axis=1)
-            Bmat[k] = np.concatenate((
-                Bmat[k][:, iMultn],
-                Bmat[k][:, iSingn]
-            ), axis=1)
         # Latent SCMs
         scms.Rsslat = np.diag(np.mean(latd, axis=1) ** 2)
         scms.Rnnlat = np.diag(np.mean(latn, axis=1) ** 2)
         scms.Rvv = np.diag(np.mean(np.concatenate(sn, axis=0), axis=1) ** 2)
         Rvkvk = [scms.Rvv[k * c.Mk:(k + 1) * c.Mk,k * c.Mk:(k + 1) * c.Mk] for k in range(c.K)]
-        # Tile matrices for centralized solution
-        Ac = np.concatenate(Amat, axis=0)
-        Bc = np.concatenate(Bmat, axis=0)
         # Extract global contribution part
-        cAk = [Amat[k][:, :-len(iSingd)] for k in range(c.K)]
-        cBk = [Bmat[k][:, :-len(iSingn)] for k in range(c.K)]
         cAkq = [[None for _ in range(c.K)] for _ in range(c.K)]
         cBkq = [[None for _ in range(c.K)] for _ in range(c.K)]
         cAkmq = [[None for _ in range(c.K)] for _ in range(c.K)]
@@ -323,22 +298,30 @@ class Run:
                 if q == k:
                     continue
                 # Find indices of global common sources between k and q
-                iComkqd = np.where(oMatd[iMultd, k] & oMatd[iMultd, q])[0]
-                iComkqn = np.where(oMatn[iMultn, k] & oMatn[iMultn, q])[0]
+                iComkqd = np.where(oMatd[:, k] & oMatd[:, q])[0]
+                iComkqn = np.where(oMatn[:, k] & oMatn[:, q])[0]
                 # ...and of global sources _not_ common between k and q
-                iUncomkqd = np.delete(np.arange(len(iMultd)), iComkqd)
-                iUncomkqn = np.delete(np.arange(len(iMultn)), iComkqn)
+                iUncomkqd = np.delete(np.arange(c.Qd), iComkqd)
+                iUncomkqn = np.delete(np.arange(c.Qn), iComkqn)
                 # Split the global-only steering matrices
-                cAkq[k][q] = cAk[k][:, iComkqd]
-                cBkq[k][q] = cBk[k][:, iComkqn]
-                cAkmq[k][q] = cAk[k][:, iUncomkqd]
-                cBkmq[k][q] = cBk[k][:, iUncomkqn]
-                # Compute latent signal SCMs
-                Rsslatkq[k][q] = np.diag(scms.Rsslat[iMultd, iMultd][iComkqd])
-                Rnnlatkq[k][q] = np.diag(scms.Rnnlat[iMultn, iMultn][iComkqn])
-                Rsslatkmq[k][q] = np.diag(scms.Rsslat[iMultd, iMultd][iUncomkqd])
-                Rnnlatkmq[k][q] = np.diag(scms.Rnnlat[iMultn, iMultn][iUncomkqn])
+                cAkq[k][q] = Amat[k][:, iComkqd]
+                cBkq[k][q] = Bmat[k][:, iComkqn]
+                cAkmq[k][q] = Amat[k][:, iUncomkqd]
+                cBkmq[k][q] = Bmat[k][:, iUncomkqn]
+                # Get corresponding latent signal SCMs
+                Rsslatkq[k][q] = np.diag(np.diag(scms.Rsslat)[iComkqd])
+                Rnnlatkq[k][q] = np.diag(np.diag(scms.Rnnlat)[iComkqn])
+                Rsslatkmq[k][q] = np.diag(np.diag(scms.Rsslat)[iUncomkqd])
+                Rnnlatkmq[k][q] = np.diag(np.diag(scms.Rnnlat)[iUncomkqn])
         
+        scms.Rsksk = [
+            Amat[k] @ scms.Rsslat @ Amat[k].T
+            for k in range(c.K)
+        ]
+        scms.Rykyk = [
+            scms.Rsksk[k] + Bmat[k] @ scms.Rnnlat @ Bmat[k].T + Rvkvk[k]
+            for k in range(c.K)
+        ]
         scms.Rgkq = [
             [
                 cAkq[k][q] @ Rsslatkq[k][q] @ cAkq[k][q].T +\
@@ -356,14 +339,6 @@ class Run:
             ]
             for k in range(c.K)
         ]
-        scms.Rsksk = [
-            Amat[k] @ scms.Rsslat @ Amat[k].T
-            for k in range(c.K)
-        ]
-        scms.Rykyk = [
-            scms.Rsksk[k] + Bmat[k] @ scms.Rnnlat @ Bmat[k].T + Rvkvk[k]
-            for k in range(c.K)
-        ]
         scms.Rykykmq = [
             [
                 cAkmq[k][q] @ Rsslatkmq[k][q] @ cAkmq[k][q].T +\
@@ -373,7 +348,10 @@ class Run:
             ]
             for k in range(c.K)
         ]
-
+        
+        # Tile matrices for centralized solution
+        Ac = np.concatenate(Amat, axis=0)
+        Bc = np.concatenate(Bmat, axis=0)
         # Centralized SCMs
         scms.Ryy = Ac @ scms.Rsslat @ Ac.T + Bc @ scms.Rnnlat @ Bc.T + scms.Rvv
         scms.Rss = Ac @ scms.Rsslat @ Ac.T
