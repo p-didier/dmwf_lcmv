@@ -110,6 +110,7 @@ def post_processing(msed: list[dict], cfg: Parameters):
         ax.grid(axis='y')
     fig.suptitle(f'Distribution of MSE_d over {NMC} MC runs (averages over {cfg.K} nodes)')
     fig.tight_layout()
+    # axes[0].set_ylim(bottom=0, top=0.0015)
     plt.show()
 
 if __name__ == '__main__':

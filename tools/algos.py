@@ -6,7 +6,7 @@
 import copy
 import numpy as np
 from .base import Parameters
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 @dataclass
 class SCMs:
@@ -17,6 +17,7 @@ class SCMs:
     Rykykmq: list = None  # SCM of yk without the common sources between k and q
     Rykyk: list = None  # SCM of microphone signals at node k
     Rsksk: list = None  # SCM of the desired sources at node k
+    Rnknk: list = None  # SCM of the noise sources at node k
     Rsslat: np.ndarray = None  # SCM of the latent desired sources
     Rnnlat: np.ndarray = None  # SCM of the latent noise sources
     Rvv: np.ndarray = None  # SCM of the self-noise
@@ -24,9 +25,61 @@ class SCMs:
 @dataclass
 class Run:
     cfg: Parameters
+    scms: SCMs = SCMs()
+
+    def __post_init__(self):
+        for field_name in SCMs.__dataclass_fields__:
+            if getattr(self.scms, field_name) is None:
+                if SCMs.__annotations__[field_name] != list:
+                    continue
+                setattr(
+                    self.scms,
+                    field_name,
+                    [
+                        [None for _ in range(self.cfg.K)]
+                        for _ in range(self.cfg.K)
+                    ]
+                )
+        pass
 
     def launch(self):
         c = self.cfg  # alias for convenience
+        
+        def build_tilde(yk, zkqCurr, kCurr):
+            zz = np.concatenate(
+                [zkqCurr[q][kCurr] for q in range(c.K) if q != kCurr],
+                axis=0
+            )
+            return np.concatenate([yk, zz], axis=0)
+
+        def build_Ck(k: int, Pkq: list[np.ndarray]):
+            """
+            Build the C_k matrix for the theoretical dMWF SCMs, such that
+            \\tilde{y}_k = C_k^H y, where y = [y_1^T, ..., y_K^T]^T.
+            C_k is thus a (M x (Mk + Qcomb)) matrix, where Qcomb is the
+            combined number of fused signals channels received by node k. 
+            
+            Parameters
+            ----------
+            k : int
+                Current node index.
+            Pkq : list[np.ndarray]
+                List of Pkq matrices for the dMWF at node k.
+            """
+            # Dimensions of zq signals
+            zqDims = [p.shape[1] if p is not None else 0 for p in Pkq]
+            Ck = np.zeros((c.M, c.Mk + np.sum(zqDims)))
+            # Fill in the Pkq matrices
+            Ck[k * c.Mk:(k + 1) * c.Mk, :c.Mk] = np.eye(c.Mk)
+            for q in range(c.K):
+                if q == k:
+                    continue
+                Ck[
+                    q * c.Mk:(q + 1) * c.Mk,
+                    c.Mk + int(np.sum(zqDims[:q])):\
+                        c.Mk + int(np.sum(zqDims[:q + 1]))
+                ] = Pkq[q]
+            return Ck
 
         def _get_obs_matrices():
             """Generate random observability matrices."""
@@ -68,8 +121,8 @@ class Run:
                 c.Mk, np.sum(oMatn[:, k])
             )
 
-        # Compute theoretical SCMs
-        scms = self.compute_theoretical_scms(
+        # Compute theoretical SCMs (stored in `self.scms`)
+        self.compute_theoretical_scms(
             latd, latn, sn, Amat, Bmat, oMatd, oMatn, QkqMat
         )
 
@@ -98,39 +151,46 @@ class Run:
                 Qkq = QkqMat[k, q]  # number of common sources between k and q
                 # Compute the spatial covariance matrix (SCM)
                 if c.scmEst == 'theoretical':
-                    Ryz = scms.Rykzq[k][q]
+                    Ryz = self.scms.Rykzq[k][q]
                 elif c.scmEst == 'batch':
                     zq = y[q][:Qkq, :]  # signal transmitted by q to k (Qkq x N)
                     Ryz = y[k] @ zq.T / c.N
                 pass
                 # Compute the unwanted signal SCM (oracle) <-- IMPORTANT ASSUMPTION for LCMV
                 if c.scmEst == 'theoretical':
-                    Ru = scms.Rykykmq[k][q]
-                elif c.scmEst == 'batch':
-                    Ru = (y[k] @ y[k].T - y[q] @ y[q].T) / c.N
-                Gam = np.linalg.inv(Ru)
-                # LCMV beamformer
-                Pkq[k][q]['LCMV'] = Gam @ Ryz @ np.linalg.pinv(Ryz.T @ Gam @ Ryz)  # (Mk x Qkq)
-                
-                # --- dMWF basic definition ---
-                if c.scmEst == 'theoretical':
-                    RyyLoc = scms.Rykyk[k]
-                elif c.scmEst == 'batch':
-                    RyyLoc = y[k] @ y[k].T / c.N
-                # Figure out which latent sources are common between k and q  # <-- IMPORTANT ASSUMPTION for dMWF
-                if c.scmEst == 'theoretical':
-                    RgkqCurr = scms.Rgkq[k][q]
+                    Rykykmq = self.scms.Rykykmq[k][q]
                 elif c.scmEst == 'batch':
                     idxCommon_kq_d = np.where(oMatd[:, k] & oMatd[:, q])[0]
                     idxCommon_kq_n = np.where(oMatn[:, k] & oMatn[:, q])[0]
                     skq = Amat[k][:, idxCommon_kq_d] @ latd[idxCommon_kq_d, :]
                     nkq = Bmat[k][:, idxCommon_kq_n] @ latn[idxCommon_kq_n, :]
                     gkq = skq + nkq# + sn[k]
-                    RgkqCurr = gkq @ gkq.T / c.N
+                    Rykykmq = (y[k] - gkq) @ (y[k] - gkq).T / c.N
+                    # Rykykmq = y[k] @ y[k].T / c.N - y[q] @ y[q].T / c.N
+                    # Rykykmq = (y[k] - y[q]) @ (y[k] - y[q]).T / c.N
+                Gam = np.linalg.inv(Rykykmq)
+                # LCMV beamformer
+                Pkq[k][q]['LCMV'] = Gam @ Ryz @ np.linalg.inv(Ryz.T @ Gam @ Ryz)  # (Mk x Qkq)
+                
+                # --- dMWF basic definition ---
+                if c.scmEst == 'theoretical':
+                    RyyLoc = self.scms.Rykyk[k]
+                elif c.scmEst == 'batch':
+                    RyyLoc = y[k] @ y[k].T / c.N
+                # Figure out which latent sources are common between k and q  # <-- IMPORTANT ASSUMPTION for dMWF
+                if c.scmEst == 'theoretical':
+                    Rgkq = self.scms.Rgkq[k][q]
+                elif c.scmEst == 'batch':
+                    idxCommon_kq_d = np.where(oMatd[:, k] & oMatd[:, q])[0]
+                    idxCommon_kq_n = np.where(oMatn[:, k] & oMatn[:, q])[0]
+                    skq = Amat[k][:, idxCommon_kq_d] @ latd[idxCommon_kq_d, :]
+                    nkq = Bmat[k][:, idxCommon_kq_n] @ latn[idxCommon_kq_n, :]
+                    gkq = skq + nkq# + sn[k]
+                    Rgkq = gkq @ gkq.T / c.N
                 # Compute the MWF
                 Ekloc = np.zeros((c.Mk, Qkq))
                 Ekloc[:Qkq, :] = np.eye(Qkq)
-                Pkq[k][q]['dMWF'] = np.linalg.inv(RyyLoc) @ RgkqCurr @ Ekloc # (Mk x Qkq)
+                Pkq[k][q]['dMWF'] = np.linalg.inv(RyyLoc) @ Rgkq @ Ekloc # (Mk x Qkq)
                 
                 # Fused signals
                 for BFtype in zkq.keys():
@@ -143,42 +203,6 @@ class Run:
             for BFtype in zkq.keys()
         ])
 
-        def build_tilde(yk, zkqCurr, kCurr):
-            zz = np.concatenate(
-                [zkqCurr[q][kCurr] for q in range(c.K) if q != kCurr],
-                axis=0
-            )
-            return np.concatenate([yk, zz], axis=0)
-
-        def build_Ck(k: int, Pkq: list[np.ndarray]):
-            """
-            Build the C_k matrix for the theoretical dMWF SCMs, such that
-            \\tilde{y}_k = C_k^H y, where y = [y_1^T, ..., y_K^T]^T.
-            C_k is thus a (M x (Mk + Qcomb)) matrix, where Qcomb is the
-            combined number of fused signals channels received by node k. 
-            
-            Parameters
-            ----------
-            k : int
-                Current node index.
-            Pkq : list[np.ndarray]
-                List of Pkq matrices for the dMWF at node k.
-            """
-            # Dimensions of zq signals
-            zqDims = [p.shape[1] if p is not None else 0 for p in Pkq]
-            Ck = np.zeros((c.M, c.Mk + np.sum(zqDims)))
-            # Fill in the Pkq matrices
-            Ck[k * c.Mk:(k + 1) * c.Mk, :c.Mk] = np.eye(c.Mk)
-            for q in range(c.K):
-                if q == k:
-                    continue
-                Ck[
-                    q * c.Mk:(q + 1) * c.Mk,
-                    c.Mk + int(np.sum(zqDims[:q])):\
-                        c.Mk + int(np.sum(zqDims[:q + 1]))
-                ] = Pkq[q]
-            return Ck
-        
         for k in range(c.K):
             for BFtype in zkq.keys():
                 ty = build_tilde(y[k], zkq[BFtype]['y'], k)
@@ -189,8 +213,8 @@ class Run:
                         if q != k else None
                         for q in range(c.K)
                     ])
-                    Rty = Ck.T @ scms.Ryy @ Ck
-                    Rts = Ck.T @ scms.Rss @ Ck
+                    Rty = Ck.T @ self.scms.Ryy @ Ck
+                    Rts = Ck.T @ self.scms.Rss @ Ck
                 elif c.scmEst == 'batch':
                     Rty = ty @ ty.T / c.N
                     Rts = ts @ ts.T / c.N
@@ -205,8 +229,8 @@ class Run:
         yc = np.concatenate(y, axis=0)
         sc = np.concatenate(s, axis=0)
         if c.scmEst == 'theoretical':
-            Ryy = scms.Ryy
-            Rss = scms.Rss
+            Ryy = self.scms.Ryy
+            Rss = self.scms.Rss
         elif c.scmEst == 'batch':
             Ryy = yc @ yc.T / c.N
             Rss = sc @ sc.T / c.N
@@ -219,8 +243,8 @@ class Run:
             dhatk['Centralized'][k] = Wk.T @ yc
             # Local MWF
             if c.scmEst == 'theoretical':
-                Ryyloc = scms.Rykyk[k]
-                Rssloc = scms.Rsksk[k]
+                Ryyloc = self.scms.Rykyk[k]
+                Rssloc = self.scms.Rsksk[k]
             elif c.scmEst == 'batch':
                 Ryyloc = y[k] @ y[k].T / c.N
                 Rssloc = s[k] @ s[k].T / c.N
@@ -277,22 +301,21 @@ class Run:
             Theoretical SCMs object.
         """
         c = self.cfg  # alias for convenience
-        # Initialize SCMs
-        scms = SCMs()
+        s = self.scms  # alias for convenience
         # Latent SCMs
-        scms.Rsslat = np.diag(np.mean(latd, axis=1) ** 2)
-        scms.Rnnlat = np.diag(np.mean(latn, axis=1) ** 2)
-        scms.Rvv = np.diag(np.mean(np.concatenate(sn, axis=0), axis=1) ** 2)
-        Rvkvk = [scms.Rvv[k * c.Mk:(k + 1) * c.Mk,k * c.Mk:(k + 1) * c.Mk] for k in range(c.K)]
-        # Extract global contribution part
-        cAkq = [[None for _ in range(c.K)] for _ in range(c.K)]
-        cBkq = [[None for _ in range(c.K)] for _ in range(c.K)]
-        cAkmq = [[None for _ in range(c.K)] for _ in range(c.K)]
-        cBkmq = [[None for _ in range(c.K)] for _ in range(c.K)]
-        Rsslatkq = [[None for _ in range(c.K)] for _ in range(c.K)]
-        Rnnlatkq = [[None for _ in range(c.K)] for _ in range(c.K)]
-        Rsslatkmq = [[None for _ in range(c.K)] for _ in range(c.K)]
-        Rnnlatkmq = [[None for _ in range(c.K)] for _ in range(c.K)]
+        s.Rsslat = np.diag(np.mean(latd, axis=1) ** 2)
+        s.Rnnlat = np.diag(np.mean(latn, axis=1) ** 2)
+        s.Rvv = np.diag(np.mean(np.concatenate(sn, axis=0), axis=1) ** 2)
+        Rvkvk = [s.Rvv[k * c.Mk:(k + 1) * c.Mk,k * c.Mk:(k + 1) * c.Mk] for k in range(c.K)]
+        # Initialize lists
+        Ak_q = [[None for _ in range(c.K)] for _ in range(c.K)]
+        Bk_q = [[None for _ in range(c.K)] for _ in range(c.K)]
+        Ak_mq = [[None for _ in range(c.K)] for _ in range(c.K)]
+        Bk_mq = [[None for _ in range(c.K)] for _ in range(c.K)]
+        Rsslatk_q = [[None for _ in range(c.K)] for _ in range(c.K)]
+        Rnnlatk_q = [[None for _ in range(c.K)] for _ in range(c.K)]
+        Rsslatk_mq = [[None for _ in range(c.K)] for _ in range(c.K)]
+        Rnnlatk_mq = [[None for _ in range(c.K)] for _ in range(c.K)]
         for k in range(c.K):
             for q in range(c.K):
                 if q == k:
@@ -304,56 +327,61 @@ class Run:
                 iUncomkqd = np.delete(np.arange(c.Qd), iComkqd)
                 iUncomkqn = np.delete(np.arange(c.Qn), iComkqn)
                 # Split the global-only steering matrices
-                cAkq[k][q] = Amat[k][:, iComkqd]
-                cBkq[k][q] = Bmat[k][:, iComkqn]
-                cAkmq[k][q] = Amat[k][:, iUncomkqd]
-                cBkmq[k][q] = Bmat[k][:, iUncomkqn]
+                Ak_q[k][q] = Amat[k][:, iComkqd]
+                Bk_q[k][q] = Bmat[k][:, iComkqn]
+                Ak_mq[k][q] = Amat[k][:, iUncomkqd]
+                Bk_mq[k][q] = Bmat[k][:, iUncomkqn]
                 # Get corresponding latent signal SCMs
-                Rsslatkq[k][q] = np.diag(np.diag(scms.Rsslat)[iComkqd])
-                Rnnlatkq[k][q] = np.diag(np.diag(scms.Rnnlat)[iComkqn])
-                Rsslatkmq[k][q] = np.diag(np.diag(scms.Rsslat)[iUncomkqd])
-                Rnnlatkmq[k][q] = np.diag(np.diag(scms.Rnnlat)[iUncomkqn])
-        
-        scms.Rsksk = [
-            Amat[k] @ scms.Rsslat @ Amat[k].T
-            for k in range(c.K)
-        ]
-        scms.Rykyk = [
-            scms.Rsksk[k] + Bmat[k] @ scms.Rnnlat @ Bmat[k].T + Rvkvk[k]
-            for k in range(c.K)
-        ]
-        scms.Rgkq = [
+                Rsslatk_q[k][q] = np.diag(np.diag(s.Rsslat)[iComkqd])
+                Rnnlatk_q[k][q] = np.diag(np.diag(s.Rnnlat)[iComkqn])
+                Rsslatk_mq[k][q] = np.diag(np.diag(s.Rsslat)[iUncomkqd])
+                Rnnlatk_mq[k][q] = np.diag(np.diag(s.Rnnlat)[iUncomkqn])
+
+                # Compute kq-pair-specific local SCMs
+                Rsksk_q = Ak_q[k][q] @ Rsslatk_q[k][q] @ Ak_q[k][q].T
+                Rnknk_q = Bk_q[k][q] @ Rnnlatk_q[k][q] @ Bk_q[k][q].T
+                Rsksk_mq = Ak_mq[k][q] @ Rsslatk_mq[k][q] @ Ak_mq[k][q].T
+                Rnknk_mq = Bk_mq[k][q] @ Rnnlatk_mq[k][q] @ Bk_mq[k][q].T
+                s.Rgkq[k][q] = Rsksk_q + Rnknk_q  # SCM of yk with just the contributions of common sources between k and q
+                s.Rykykmq[k][q] = Rsksk_mq + Rnknk_mq + Rvkvk[k]  # SCM of yk without the common sources between k and q
+
+                # Sanity checks
+                assert np.allclose(  # Check consistency of sum of SCMs
+                    s.Rgkq[k][q] + s.Rykykmq[k][q],
+                    Amat[k] @ s.Rsslat @ Amat[k].T +\
+                    Bmat[k] @ s.Rnnlat @ Bmat[k].T + Rvkvk[k]
+                )
+
+            # Compute usual local SCMs
+            s.Rsksk[k] = Amat[k] @ s.Rsslat @ Amat[k].T
+            s.Rnknk[k] = Bmat[k] @ s.Rnnlat @ Bmat[k].T
+            s.Rykyk[k] = s.Rsksk[k] + s.Rnknk[k] + Rvkvk[k]
+    
+            # Check
+            assert np.all([np.allclose(
+                s.Rgkq[k][q] + s.Rykykmq[k][q],
+                s.Rykyk[k]
+            ) for q in range(c.K) if q != k])
+
+        # Compute kq-pair-specific kq-SCMs
+        for k in range(c.K):
+            for q in range(c.K):
+                if q == k:
+                    continue
+                Rsksq_com = Ak_q[k][q] @ Rsslatk_q[k][q] @ Ak_q[q][k].T
+                Rnknsq_com = Bk_q[k][q] @ Rnnlatk_q[k][q] @ Bk_q[q][k].T
+                s.Rykzq[k][q] = (Rsksq_com + Rnknsq_com)[:, :QkqMat[k, q]]
+
+        assert np.all([  # Check symmetry of latent SCMs
             [
-                cAkq[k][q] @ Rsslatkq[k][q] @ cAkq[k][q].T +\
-                    cBkq[k][q] @ Rnnlatkq[k][q] @ cBkq[k][q].T
-                if q != k else None
-                for q in range(c.K)
-            ]
-            for k in range(c.K)
-        ]
-        scms.Rykzq = [
-            [
-                scms.Rgkq[k][q][:, :QkqMat[k, q]]
-                if q != k else None
-                for q in range(c.K)
-            ]
-            for k in range(c.K)
-        ]
-        scms.Rykykmq = [
-            [
-                cAkmq[k][q] @ Rsslatkmq[k][q] @ cAkmq[k][q].T +\
-                    cBkmq[k][q] @ Rnnlatkmq[k][q] @ cBkmq[k][q].T + Rvkvk[k]
-                if q != k else None
-                for q in range(c.K)
-            ]
-            for k in range(c.K)
-        ]
+                np.allclose(Rsslatk_q[k][q], Rsslatk_q[q][k])
+                for k in range(c.K) if k != q
+            ] for q in range(c.K)
+        ])
         
         # Tile matrices for centralized solution
         Ac = np.concatenate(Amat, axis=0)
         Bc = np.concatenate(Bmat, axis=0)
         # Centralized SCMs
-        scms.Ryy = Ac @ scms.Rsslat @ Ac.T + Bc @ scms.Rnnlat @ Bc.T + scms.Rvv
-        scms.Rss = Ac @ scms.Rsslat @ Ac.T
-
-        return scms
+        s.Ryy = Ac @ s.Rsslat @ Ac.T + Bc @ s.Rnnlat @ Bc.T + s.Rvv
+        s.Rss = Ac @ s.Rsslat @ Ac.T

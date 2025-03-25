@@ -4,7 +4,7 @@ D: 1      # number of target signal channels at every node
 Qd: 5     # number of desired sources in environment
 Qn: 5     # number of noise sources in environment
 N: 10000    # number of samples
-scmEst: theoretical    # type of SCM estimation method ('theoretical' or 'batch')
-# scmEst: batch    # type of SCM estimation method ('theoretical' or 'batch')
+# scmEst: theoretical    # type of SCM estimation method ('theoretical' or 'batch')
+scmEst: batch    # type of SCM estimation method ('theoretical' or 'batch')
 
 seed: 42  # random number generator seed (for 1st MC run)
