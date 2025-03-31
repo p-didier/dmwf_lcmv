@@ -17,7 +17,7 @@ class Parameters:
     Qd: int = 5     # number of desired sources in environment
     Qn: int = 3     # number of noise sources in environment
     N: int = int(1e4)    # number of samples
-    scmEst: str = 'theoretical'    # type of SCM estimation method ('theoretical' or 'batch')
+    scmEst: str = 'theoretical'    # type of SCM estimation method ('theoretical', 'batch', or 'online')
 
     seed: int = 42  # random number generator seed
     outputDir: str = ""  # path to output directory

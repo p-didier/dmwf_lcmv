@@ -69,6 +69,7 @@ def post_processing(msed: list[dict], cfg: Parameters):
     })
     fig.set_size_inches(8.5, 3.5)
     violinWidth = 0.8
+    xScatter = np.random.normal(0, 0.1, NMC)
     for ii, BFtype in enumerate(msed[0].keys()):
         # Data
         data = np.mean(np.array([msed[jj][BFtype] for jj in range(NMC)]), axis=1)
@@ -91,8 +92,8 @@ def post_processing(msed: list[dict], cfg: Parameters):
             violinparts[partname].set_edgecolor('black')  # Change edges to black
             violinparts[partname].set_linewidth(2)
         # Plot scatter of individual runs, with random jitter
-        xScatter = np.random.normal(posViolin[0], 0.1, len(data))
-        axes[idxAx].scatter(xScatter, data, marker='.', color=col)
+        xScatterCurr = xScatter + posViolin[0]
+        axes[idxAx].scatter(xScatterCurr, data, marker='.', color=col)
         # Add markers on y-axis to show mean values
         axes[idxAx].text(posViolin[0], np.amax(data), f"Mean:\n{np.mean(data):.2e}", ha='center', va='bottom')
         # Adjust y-axis upper limit if text is too close to the top
