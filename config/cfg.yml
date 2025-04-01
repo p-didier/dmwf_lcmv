@@ -6,10 +6,11 @@ Qn: 5     # number of noise sources in environment
 Nbatch: 10000    # number of samples for batch processing
 Nonline: 100    # number of samples for online processing (frame length)
 nFrames: 100    # number of time frames (only for online processing)
+upEvery: 20    # number of time frames between consecutive updates of the fusion matrices (only for online processing)
 beta: 0.999    # exponential averaging factor (only for online processing)
 # Type of SCM estimation method ('theoretical' or 'batch')
 # scmEst: theoretical
-scmEst: batch
-# scmEst: online
+# scmEst: batch
+scmEst: online
 
 seed: 42  # random number generator seed (for 1st MC run)

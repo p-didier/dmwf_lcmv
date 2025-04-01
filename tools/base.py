@@ -19,6 +19,7 @@ class Parameters:
     Nbatch: int = int(1e4)    # number of samples for batch processing
     Nonline: int = int(1e2)    # number of samples for online processing (frame length)
     nFrames: int = int(1e2)    # number of time frames (only for online processing)
+    upEvery: int = 1    # number of time frames between consecutive updates of the fusion matrices (only for online processing)
     beta: float = 0.995    # exponential averaging factor (only for online processing)
     scmEst: str = 'theoretical'    # type of SCM estimation method ('theoretical', 'batch', or 'online')
 

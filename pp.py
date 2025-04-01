@@ -20,9 +20,10 @@ import matplotlib.pyplot as plt
 plt.ion()  # interactive mode on
 
 pathToData = f'{Path(__file__).parent}/out/data/'
-DATA_FILE = f'{pathToData}/run_20250401_093538.pkl'
+DATA_FILE = f'{pathToData}/run_20250401_093538_batch.pkl'
+DATA_FILE = f'{pathToData}/run_20250401_094835_online.pkl'
 
-PALETTE = 'seabed'
+PALETTE = mypalettes.get_palette('seabed')
 
 def main():
     """Main function (called by default when running script)."""
@@ -30,27 +31,95 @@ def main():
         msed = pickle.load(f)
 
     if isinstance(msed[0][list(msed[0].keys())[0]][0], float):
-        plot_batch(msed)
+        fig = plot_batch(msed)
     else:
-        plot_online(msed)
+        fig = plot_online(msed)
+
+    # Save figure
+    exportFileName = f'{pathToData}/../{DATA_FILE.split("/")[-1].split(".")[0]}'
+    fig.savefig(f'{exportFileName}.png', dpi=300, bbox_inches='tight')
+    fig.savefig(f'{exportFileName}.pdf', dpi=300)
+    print(f"Figure saved to {pathToData}/../{DATA_FILE.split('/')[-1].split('.')[0]}.png")
+
+
+def discretized_palette(palette, n_colors):
+    """
+    Discretize a given color palette to `n_colors` colors.
+    """
+    return [
+        palette[ii]
+        for ii in np.linspace(
+            0, len(palette) - 1, n_colors
+        ).astype(int)
+    ]
 
 
 def plot_online(msed):
-    pass
+    """Online-mode run plot: line plot."""
+    # Select len(msed[0].keys()) equally spaced colors from the palette
+    paletteCurr = discretized_palette(PALETTE, len(msed[0].keys()))
+    markers = ['o', 's', '^', 'D', 'x', 'v', 'p', '*']
+
+    order = [
+        'Unprocessed',
+        'Local',
+        'dMWF',
+        'LCMV',
+        'Simple',
+        'Centralized'
+    ]
+
+    fig, axes = plt.subplots(1, 1)
+    fig.set_size_inches(7, 3.5)
+    for ii, BFtype in enumerate(order):
+        # Data
+        data = np.mean(
+            np.array([msed[jj][BFtype] for jj in range(len(msed))]),
+            axis=-1
+        )  # [nMCruns x nSamples]
+        # Turn to dB
+        data = 10 * np.log10(data)
+        # Mean and standard deviation over MC runs
+        m = np.mean(data, axis=0)
+        s = np.std(data, axis=0)
+        # Plot
+        col = paletteCurr[ii]
+        if BFtype == 'Centralized':
+            col = 'k'
+        axes.plot(
+            m,
+            label=BFtype,
+            color=col,
+            marker=markers[ii % len(markers)],
+            markersize=5,
+            markeredgecolor=col,
+            markerfacecolor='none',
+            markevery=0.1,
+        )
+        # # Add shaded area for standard deviation
+        # axes.fill_between(
+        #     np.arange(len(m)), m - s, m + s,
+        #     alpha=0.1, color=col, edgecolor='none'
+        # )
+    axes.set_xlabel('Frame index')
+    axes.set_ylabel('MSE_d [dB]')
+    axes.set_xlim([0, 100])
+    axes.legend()
+    # axes.set_title(f'MSE_d over {len(msed)} MC runs (averages over {msed[0]["Unprocessed"].shape[-1]} nodes)')
+    fig.tight_layout()
+    # Turn off outer edges
+    for ax in fig.get_axes():
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+    plt.show()
+    
+    return fig
 
 
 def plot_batch(msed):
-    """
-    Batch-mode run plot: violins.
-    """
-    palette = mypalettes.get_palette(PALETTE)
+    """Batch-mode run plot: violins."""
     # Select len(msed[0].keys()) equally spaced colors from the palette
-    palette = [
-        palette[ii]
-        for ii in np.linspace(
-            0, len(palette) - 1, len(msed[0].keys())
-        ).astype(int)
-    ]
+    paletteCurr = discretized_palette(PALETTE, len(msed[0].keys()))
 
     # Plot results
     fig, axes = plt.subplots(1, 2, gridspec_kw={
@@ -68,12 +137,12 @@ def plot_batch(msed):
         else:
             idxAx = 0
             posViolin = [ii]
-        col = palette[ii]
+        col = paletteCurr[ii]
         # Violin plot over MC runs, averaged over nodes
         violinparts = axes[idxAx].violinplot(data, positions=posViolin, widths=violinWidth, showmeans=True, showextrema=False)
         for pc in violinparts['bodies']:
             pc.set_facecolor(col)
-            pc.set_edgecolor(palette[-1])
+            pc.set_edgecolor(paletteCurr[-1])
             pc.set_alpha(0.5)
         for partname in ('cbars', 'cmins', 'cmaxes', 'cmeans'):
             if partname not in violinparts.keys():
@@ -102,6 +171,8 @@ def plot_batch(msed):
     fig.tight_layout()
     # axes[0].set_ylim(bottom=0, top=0.0015)
     plt.show()
+
+    return fig
 
 if __name__ == '__main__':
     sys.exit(main())

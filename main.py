@@ -37,12 +37,12 @@ def main():
     # profiler.start()
 
     msed = []
+    t0 = time.time()
     for ii in range(NMC):
-        t0 = time.time()
         cfg.seed += 1  # change seed for each run
         # Launch the simulation
         msed.append(Run(cfg).launch())
-        print(f"Monte Carlo run {ii + 1}/{NMC} completed in {time.time() - t0:.2f} s.", end='\r')
+        print(f"Monte Carlo run {ii + 1}/{NMC} completed (total time: {time.time() - t0:.2f} s).", end='\r')
     print("\nAll Monte Carlo runs completed.")
 
     # Export

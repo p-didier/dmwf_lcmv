@@ -344,15 +344,25 @@ class Run:
         # Fusion matrices and fused signals via LCMV beamforming or from the
         # dMWF basic definition (local MWFs)
         baseDict = {
-            'y': [[None for _ in range(c.K)] for _ in range(c.K)],
-            's': [[None for _ in range(c.K)] for _ in range(c.K)],
+            'y': [
+                [np.random.randn(QkqMat[k, q], c.Nonline) for q in range(c.K)]
+                for k in range(c.K)
+            ],
+            's': [
+                [np.random.randn(QkqMat[k, q], c.Nonline) for q in range(c.K)]
+                for k in range(c.K)
+            ],
         }
         zkq = {
             'LCMV': baseDict,
+            'LCMP': copy.deepcopy(baseDict),
             'Simple': copy.deepcopy(baseDict),
             'dMWF': copy.deepcopy(baseDict),
         }
-        Pkq = [[{} for _ in range(c.K)] for _ in range(c.K)]
+        Pkq = [[dict([
+            (BFtype, np.random.randn(c.Mk, QkqMat[k, q]))
+            for BFtype in zkq.keys()
+        ]) for q in range(c.K)] for k in range(c.K)]
         # SCMs
         Ryy = SCM(beta=c.beta)
         Rss = SCM(beta=c.beta)
@@ -374,6 +384,8 @@ class Run:
         msed = dict([
             (BFtype, np.zeros((c.nFrames, c.K))) for BFtype in allAlgos
         ])
+
+        testR = [[np.random.randn(QkqMat[k, q], c.Mk) for q in range(c.K)] for k in range(c.K)]
 
         for l in range(c.nFrames):
             print(f"Frame {l + 1}/{c.nFrames}...", end='\r')
@@ -398,20 +410,32 @@ class Run:
                     # Update the k SCM with respect to incoming signal from q
                     yqb = y[q][:Qkq, :]  # signal transmitted by q to k (Qkq x N)
                     Rykyqb[k][q].update(_inner(y[k], yqb))
+                    # Rykyqb[k][q].update(_inner(y[k], testR[k][q] @ y[q]))
+                    # Rykyqb[k][q].update(_inner(
+                    #     y[k],
+                    #     (
+                    #         np.linalg.pinv(Pkq[q][k]['Simple']).T @\
+                    #             zkq['Simple']['y'][q][k]
+                    #     )[:Qkq, :]
+                    # ))
+                    # Rykyqb[k][q].update(_inner(y[k], zkq['LCMP']['y'][q][k]))
+                    
 
                     # Update the k SCM of all contributions _but_ those of
                     # the common sources between k and q
                     gkq = get_gkq(k, q, Amat, Bmat, latd, latn, oMatd, oMatn)
                     Rykykmq[k][q].update(_inner(y[k] - gkq))
-                    Gam = np.linalg.inv(Rykykmq[k][q].val)
 
-                    # LCMV beamformer
-                    Rykyqb_ = Rykyqb[k][q].val  # alias for conciseness
-                    Pkq[k][q]['LCMV'] = Gam @ Rykyqb_ @\
-                        np.linalg.inv(Rykyqb_.T @ Gam @ Rykyqb_)  # (Mk x Qkq)
-                    # Normalize LCMV weights
-                    Pkq[k][q]['LCMV'] /= np.linalg.norm(Pkq[k][q]['LCMV'])
-                    Pkq[k][q]['Simple'] = Lam @ Rykyqb_
+                    if l % c.upEvery == 0:
+                        Rykyqb_ = Rykyqb[k][q].val  # alias for conciseness
+                        Gam = np.linalg.inv(Rykykmq[k][q].val)
+                        Pkq[k][q]['LCMV'] = Gam @ Rykyqb_ @\
+                            np.linalg.inv(Rykyqb_.T @ Gam @ Rykyqb_)  # (Mk x Qkq)
+                        Pkq[k][q]['LCMV'] /= np.linalg.norm(Pkq[k][q]['LCMV'])
+                        Pkq[k][q]['Simple'] = Lam @ Rykyqb_
+                        Pkq[k][q]['LCMP'] = Lam @ Rykyqb_ @\
+                            np.linalg.inv(Rykyqb_.T @ Lam @ Rykyqb_)  # (Mk x Qkq)
+                        Pkq[k][q]['LCMP'] /= np.linalg.norm(Pkq[k][q]['LCMP'])
 
                     # --- dMWF original definition ---
                     Rgkq[k][q].update(_inner(gkq))
