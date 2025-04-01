@@ -7,10 +7,22 @@ import copy
 import numpy as np
 from .base import Parameters
 import matplotlib.pyplot as plt
+from pyinstrument import Profiler
 from dataclasses import dataclass, field
 
 @dataclass
-class SCMs:
+class SCM:
+    val: np.ndarray = None
+    beta: float = 0.995  # Exponential averaging factor
+    def update(self, yyH: np.ndarray):
+        """Update the spatial covariance matrix using exponential averaging."""
+        if self.val is None:
+            # SCM not yet initialized. Do it now
+            self.val = np.zeros_like(yyH)
+        self.val = self.beta * self.val + (1 - self.beta) * yyH
+
+@dataclass
+class TheoreticalSCMs:
     Ryy: np.ndarray = None  # centralized SCM of the microphone signals
     Rss: np.ndarray = None  # centralized SCM of the desired source signals
     Rgkq: list = None  # SCM of the common sources between k and q
@@ -26,12 +38,12 @@ class SCMs:
 @dataclass
 class Run:
     cfg: Parameters
-    scms: SCMs = SCMs()
+    scms: TheoreticalSCMs = TheoreticalSCMs()
 
     def __post_init__(self):
-        for field_name in SCMs.__dataclass_fields__:
+        for field_name in TheoreticalSCMs.__dataclass_fields__:
             if getattr(self.scms, field_name) is None:
-                if SCMs.__annotations__[field_name] != list:
+                if TheoreticalSCMs.__annotations__[field_name] != list:
                     continue
                 setattr(
                     self.scms,
@@ -43,70 +55,25 @@ class Run:
                 )
         pass
 
-    def launch(self):
+    def _get_steering_matrices(self, oMatd, oMatn):
+        """
+        Compute the steering matrices for the desired and noise sources.
+
+        Parameters
+        ----------
+        oMatd : np.ndarray (Qd x K)
+            Observability matrix for the desired sources.
+        oMatn : np.ndarray (Qn x K)
+            Observability matrix for the noise sources.
+
+        Returns
+        -------
+        Amat : list[np.ndarray]
+            Steering matrices for the desired sources.
+        Bmat : list[np.ndarray]
+            Steering matrices for the noise sources.
+        """
         c = self.cfg  # alias for convenience
-        
-        def build_tilde(yk, zkqCurr, kCurr):
-            zz = np.concatenate(
-                [zkqCurr[q][kCurr] for q in range(c.K) if q != kCurr],
-                axis=0
-            )
-            return np.concatenate([yk, zz], axis=0)
-
-        def build_Ck(k: int, Pkq: list[np.ndarray]):
-            """
-            Build the C_k matrix for the theoretical dMWF SCMs, such that
-            \\tilde{y}_k = C_k^H y, where y = [y_1^T, ..., y_K^T]^T.
-            C_k is thus a (M x (Mk + Qcomb)) matrix, where Qcomb is the
-            combined number of fused signals channels received by node k. 
-            
-            Parameters
-            ----------
-            k : int
-                Current node index.
-            Pkq : list[np.ndarray]
-                List of Pkq matrices for the dMWF at node k.
-            """
-            # Dimensions of zq signals
-            zqDims = [p.shape[1] if p is not None else 0 for p in Pkq]
-            Ck = np.zeros((c.M, c.Mk + np.sum(zqDims)))
-            # Fill in the Pkq matrices
-            Ck[k * c.Mk:(k + 1) * c.Mk, :c.Mk] = np.eye(c.Mk)
-            for q in range(c.K):
-                if q == k:
-                    continue
-                Ck[
-                    q * c.Mk:(q + 1) * c.Mk,
-                    c.Mk + int(np.sum(zqDims[:q])):\
-                        c.Mk + int(np.sum(zqDims[:q + 1]))
-                ] = Pkq[q]
-            return Ck
-
-        def _get_obs_matrices():
-            """Generate random observability matrices."""
-            oMatd = np.random.randint(0, 2, (c.Qd, c.K))
-            oMatn = np.random.randint(0, 2, (c.Qn, c.K))
-            # Ensure that at each source is observed by at least one node
-            for i in range(c.Qd):
-                if np.sum(oMatd[i, :]) == 0:
-                    oMatd[i, np.random.randint(0, c.K)] = 1
-            for i in range(c.Qn):
-                if np.sum(oMatn[i, :]) == 0:
-                    oMatn[i, np.random.randint(0, c.K)] = 1
-            return oMatd, oMatn
-
-        # ---- Setup environment ----
-        # Observability matrix: random matrix of 0's and 1's
-        oMatd, oMatn = _get_obs_matrices()
-        oMat = np.concatenate((oMatd, oMatn), axis=0)
-        QkqMat = oMat.T @ oMat  # number of common sources between nodes
-
-        # Latent source signals
-        latd = np.random.randn(c.Qd, c.N)  # desired
-        latn = np.random.randn(c.Qn, c.N)  # noise
-        # Self-noise
-        sn = [np.random.randn(c.Mk, c.N) for _ in range(c.K)]
-
         # Centralized steering matrices
         Amat = [np.zeros((c.Mk, c.Qd)) for _ in range(c.K)]
         Bmat = [np.zeros((c.Mk, c.Qn)) for _ in range(c.K)]
@@ -118,17 +85,128 @@ class Run:
             Bmat[k][:, oMatn[:, k].astype(bool)] = np.random.randn(
                 c.Mk, np.sum(oMatn[:, k])
             )
+        return Amat, Bmat
 
-        # Compute theoretical SCMs (stored in `self.scms`)
-        self.compute_theoretical_scms(
-            latd, latn, sn, Amat, Bmat, oMatd, oMatn, QkqMat
-        )
-
+    def _get_latent_sigs(self, nSamples: int, Amat, Bmat):
+        """
+        Compute latent source signals and corresponding steering
+        matrices.
+        
+        Parameters
+        ----------
+        nSamples : int
+            Number of samples to generate per channel.
+        Amat : list[np.ndarray]
+            Steering matrices for the desired sources.
+        Bmat : list[np.ndarray]
+            Steering matrices for the noise sources.
+        
+        Returns
+        -------
+        y : list[np.ndarray]
+            Microphone signals per node.
+        s : list[np.ndarray]
+            Desired source signals per node.
+        d : list[np.ndarray]
+            Target signals per node.
+        n : list[np.ndarray]
+            Noise signals per node.
+        latd : np.ndarray
+            Desired latent source signals.
+        latn : np.ndarray
+            Noise latent source signals.
+        sn : list[np.ndarray]
+            Self-noise signals per node.
+        """
+        c = self.cfg  # alias for convenience
+        # Latent source signals
+        latd = np.random.randn(c.Qd, nSamples)  # desired
+        latn = np.random.randn(c.Qn, nSamples)  # noise
+        # Self-noise
+        sn = [np.random.randn(c.Mk, nSamples) for _ in range(c.K)]
         # Microphone signals
         s = [Amat[k] @ latd for k in range(c.K)]  # desired sources contribution
         n = [Bmat[k] @ latn for k in range(c.K)]  # noise sources contribution
         d = [s[k][:c.D, :] for k in range(c.K)]  # target signals
         y = [s[k] + n[k] + sn[k] for k in range(c.K)]  # microphone signals
+        return y, s, d, n, latd, latn, sn
+        
+    def build_tilde(self, yk, zkqCurr, kCurr):
+        """Build \\tilde{y}_k (DANSE or dMWF)."""
+        zz = np.concatenate(
+            [zkqCurr[q][kCurr] for q in range(self.cfg.K) if q != kCurr],
+            axis=0
+        )
+        return np.concatenate([yk, zz], axis=0)
+
+    def build_Ck(self, k: int, Pkq: list[np.ndarray]):
+        """
+        Build the C_k matrix for the theoretical dMWF SCMs, such that
+        \\tilde{y}_k = C_k^H y, where y = [y_1^T, ..., y_K^T]^T.
+        C_k is thus a (M x (Mk + Qcomb)) matrix, where Qcomb is the
+        combined number of fused signals channels received by node k. 
+        
+        Parameters
+        ----------
+        k : int
+            Current node index.
+        Pkq : list[np.ndarray]
+            List of Pkq matrices for the dMWF at node k.
+        """
+        c = self.cfg  # alias for convenience
+        # Dimensions of zq signals
+        zqDims = [p.shape[1] if p is not None else 0 for p in Pkq]
+        Ck = np.zeros((c.M, c.Mk + np.sum(zqDims)))
+        # Fill in the Pkq matrices
+        Ck[k * c.Mk:(k + 1) * c.Mk, :c.Mk] = np.eye(c.Mk)
+        for q in range(c.K):
+            if q == k:
+                continue
+            Ck[
+                q * c.Mk:(q + 1) * c.Mk,
+                c.Mk + int(np.sum(zqDims[:q])):\
+                    c.Mk + int(np.sum(zqDims[:q + 1]))
+            ] = Pkq[q]
+        return Ck
+
+    def obs_matrices(self):
+        """Generate random observability matrices."""
+        c = self.cfg  # alias for convenience
+        oMatd = np.random.randint(0, 2, (c.Qd, c.K))
+        oMatn = np.random.randint(0, 2, (c.Qn, c.K))
+        # Ensure that at each source is observed by at least one node
+        for i in range(c.Qd):
+            if np.sum(oMatd[i, :]) == 0:
+                oMatd[i, np.random.randint(0, c.K)] = 1
+        for i in range(c.Qn):
+            if np.sum(oMatn[i, :]) == 0:
+                oMatn[i, np.random.randint(0, c.K)] = 1
+        return oMatd, oMatn
+        
+    def launch(self):
+        if self.cfg.scmEst in ['theoretical', 'batch']:
+            return self.launch_batch_type()
+        else:
+            return self.launch_online_type()
+
+    def launch_batch_type(self):
+        """
+        Launch the batch type simulation (theoretical or batch SCM estimation).
+        """
+        c = self.cfg  # alias for convenience
+
+        oMatd, oMatn = self.obs_matrices()
+        oMat = np.concatenate((oMatd, oMatn), axis=0)
+        QkqMat = oMat.T @ oMat  # number of common sources between nodes
+
+        # Compute signals at once
+        Amat, Bmat = self._get_steering_matrices(oMatd, oMatn)
+        y, s, d, n, latd, latn, sn =\
+            self._get_latent_sigs(
+                nSamples=c.Nbatch,
+                Amat=Amat,
+                Bmat=Bmat
+            )
 
         # Fusion matrices and fused signals via LCMV beamforming or from the
         # dMWF basic definition (local MWFs)
@@ -138,7 +216,7 @@ class Run:
         }
         zkq = {
             'LCMV': baseDict,
-            'LCMP': copy.deepcopy(baseDict),
+            'Simple': copy.deepcopy(baseDict),
             'dMWF': copy.deepcopy(baseDict),
         }
         Pkq = [[{} for _ in range(c.K)] for _ in range(c.K)]
@@ -148,49 +226,35 @@ class Run:
                     continue
                 # --- LCMV beamformer ---
                 Qkq = QkqMat[k, q]  # number of common sources between k and q
-                # Compute the yk vs. zq spatial covariance matrix (SCM)
-                # and the unwanted signal SCM (oracle) <-- IMPORTANT ASSUMPTION for LCMV
                 if c.scmEst == 'theoretical':
                     Rykyk = self.scms.Rykyk[k]
                     Rykyqb = self.scms.Rykyqb[k][q]
                     Rykykmq = self.scms.Rykykmq[k][q]
                 elif c.scmEst == 'batch':
-                    Rykyk = y[k] @ y[k].T / c.N
+                    Rykyk = y[k] @ y[k].T / c.Nbatch
                     yqb = y[q][:Qkq, :]  # signal transmitted by q to k (Qkq x N)
-                    Rykyqb = y[k] @ yqb.T / c.N
+                    Rykyqb = y[k] @ yqb.T / c.Nbatch
                     # Figure out which latent sources are common between k and q  # <-- IMPORTANT ASSUMPTION for dMWF
-                    iComkqd = np.where(oMatd[:, k] & oMatd[:, q])[0]
-                    iComkqn = np.where(oMatn[:, k] & oMatn[:, q])[0]
-                    skq = Amat[k][:, iComkqd] @ latd[iComkqd, :]
-                    nkq = Bmat[k][:, iComkqn] @ latn[iComkqn, :]
-                    gkq = skq + nkq  # <-- also used for `Rgkq` below
-                    iUncomkqd = np.delete(np.arange(c.Qd), iComkqd)
-                    iUncomkqn = np.delete(np.arange(c.Qn), iComkqn)
-                    skmq = Amat[k][:, iUncomkqd] @ latd[iUncomkqd, :]
-                    nkmq = Bmat[k][:, iUncomkqn] @ latn[iUncomkqn, :]
-                    gkmq = skmq + nkmq + sn[k]
-                    assert np.allclose(gkq + gkmq, y[k])
-                    Rykykmq = (y[k] - gkq) @ (y[k] - gkq).T / c.N
+                    gkq = get_gkq(k, q, Amat, Bmat, latd, latn, oMatd, oMatn)
+                    Rykykmq = (y[k] - gkq) @ (y[k] - gkq).T / c.Nbatch
                 Gam = np.linalg.inv(Rykykmq)
                 Lam = np.linalg.inv(Rykyk)
                 # LCMV beamformer
                 Pkq[k][q]['LCMV'] = Gam @ Rykyqb @\
                     np.linalg.inv(Rykyqb.T @ Gam @ Rykyqb)  # (Mk x Qkq)
-                Pkq[k][q]['LCMP'] = Lam @ Rykyqb #@\
-                # Pkq[k][q]['LCMP'] = Lam[:, :Qkq] #@\
-                    # np.linalg.inv(Rykyqb.T @ Lam @ Rykyqb)  # (Mk x Qkq)
-                
+                Pkq[k][q]['Simple'] = Lam @ Rykyqb
+
                 # --- dMWF original definition ---
                 if c.scmEst == 'theoretical':
                     Rgkq = self.scms.Rgkq[k][q]
                 elif c.scmEst == 'batch':
-                    Rgkq = gkq @ gkq.T / c.N
-                # Compute the MWF
+                    Rgkq = gkq @ gkq.T / c.Nbatch
                 Ekloc = np.zeros((c.Mk, Qkq))
                 Ekloc[:Qkq, :] = np.eye(Qkq)
                 Pkq[k][q]['dMWF'] = np.linalg.inv(Rykyk) @\
                     Rgkq @ Ekloc # (Mk x Qkq)
                 
+                pass
                 # Fused signals
                 for BFtype in zkq.keys():
                     zkq[BFtype]['y'][k][q] = Pkq[k][q][BFtype].T @ y[k]
@@ -204,10 +268,10 @@ class Run:
 
         for k in range(c.K):
             for BFtype in zkq.keys():
-                ty = build_tilde(y[k], zkq[BFtype]['y'], k)
-                ts = build_tilde(s[k], zkq[BFtype]['s'], k)
+                ty = self.build_tilde(y[k], zkq[BFtype]['y'], k)
+                ts = self.build_tilde(s[k], zkq[BFtype]['s'], k)
                 if c.scmEst == 'theoretical':
-                    Ck = build_Ck(k, [
+                    Ck = self.build_Ck(k, [
                         Pkq[k][q][BFtype]
                         if q != k else None
                         for q in range(c.K)
@@ -215,8 +279,8 @@ class Run:
                     Rty = Ck.T @ self.scms.Ryy @ Ck
                     Rts = Ck.T @ self.scms.Rss @ Ck
                 elif c.scmEst == 'batch':
-                    Rty = ty @ ty.T / c.N
-                    Rts = ts @ ts.T / c.N
+                    Rty = ty @ ty.T / c.Nbatch
+                    Rts = ts @ ts.T / c.Nbatch
                 # Selection vector
                 tE = np.zeros((Rty.shape[0], c.D))
                 tE[:c.D, :] = np.eye(c.D)
@@ -231,8 +295,8 @@ class Run:
             Ryy = self.scms.Ryy
             Rss = self.scms.Rss
         elif c.scmEst == 'batch':
-            Ryy = yc @ yc.T / c.N
-            Rss = sc @ sc.T / c.N
+            Ryy = yc @ yc.T / c.Nbatch
+            Rss = sc @ sc.T / c.Nbatch
         dhatk['Centralized'] = [None for _ in range(c.K)]
         dhatk['Local'] = [None for _ in range(c.K)]
         for k in range(c.K):
@@ -245,8 +309,8 @@ class Run:
                 Ryyloc = self.scms.Rykyk[k]
                 Rssloc = self.scms.Rsksk[k]
             elif c.scmEst == 'batch':
-                Ryyloc = y[k] @ y[k].T / c.N
-                Rssloc = s[k] @ s[k].T / c.N
+                Ryyloc = y[k] @ y[k].T / c.Nbatch
+                Rssloc = s[k] @ s[k].T / c.Nbatch
             Ekk = np.zeros((Ryyloc.shape[0], c.D))
             Ekk[:c.D, :] = np.eye(c.D)
             Wkloc = np.linalg.inv(Ryyloc) @ Rssloc @ Ekk
@@ -262,6 +326,169 @@ class Run:
                 for k in range(c.K)
             ]) for BFtype, dh in dhatk.items()
         ])
+
+        return msed
+    
+    def launch_online_type(self):
+        """
+        Launch the online type simulation (online SCM estimation).
+        """
+        c = self.cfg  # alias for convenience
+
+        # Set up environment
+        oMatd, oMatn = self.obs_matrices()
+        oMat = np.concatenate((oMatd, oMatn), axis=0)
+        QkqMat = oMat.T @ oMat  # number of common sources between nodes
+        Amat, Bmat = self._get_steering_matrices(oMatd, oMatn)
+
+        # Fusion matrices and fused signals via LCMV beamforming or from the
+        # dMWF basic definition (local MWFs)
+        baseDict = {
+            'y': [[None for _ in range(c.K)] for _ in range(c.K)],
+            's': [[None for _ in range(c.K)] for _ in range(c.K)],
+        }
+        zkq = {
+            'LCMV': baseDict,
+            'Simple': copy.deepcopy(baseDict),
+            'dMWF': copy.deepcopy(baseDict),
+        }
+        Pkq = [[{} for _ in range(c.K)] for _ in range(c.K)]
+        # SCMs
+        Ryy = SCM(beta=c.beta)
+        Rss = SCM(beta=c.beta)
+        baseList = [SCM(beta=c.beta) for _ in range(c.K)]
+        Rty = dict([(BFtype, copy.deepcopy(baseList)) for BFtype in zkq.keys()])
+        Rts = copy.deepcopy(Rty)
+        Rykyk = copy.deepcopy(baseList)
+        Rsksk = copy.deepcopy(Rykyk)
+        Rykyqb = [copy.deepcopy(baseList) for _ in range(c.K)]
+        Rykykmq = copy.deepcopy(Rykyqb)
+        Rgkq = copy.deepcopy(Rykyqb)
+
+        def _inner(x1, x2=None):
+            if x2 is None:
+                x2 = x1
+            return x1 @ x2.T / c.Nonline
+        
+        allAlgos = list(zkq.keys()) + ['Centralized', 'Local', 'Unprocessed']
+        msed = dict([
+            (BFtype, np.zeros((c.nFrames, c.K))) for BFtype in allAlgos
+        ])
+
+        for l in range(c.nFrames):
+            print(f"Frame {l + 1}/{c.nFrames}...", end='\r')
+            # Compute signals for current frame
+            y, s, d, n, latd, latn, sn =\
+                self._get_latent_sigs(
+                    nSamples=c.Nonline,  # <-- ONLY c.Nonline samples per channel
+                    Amat=Amat,
+                    Bmat=Bmat
+                )
+
+            for k in range(c.K):
+                
+                # Update the local SCM
+                Rykyk[k].update(_inner(y[k]))
+                Lam = np.linalg.inv(Rykyk[k].val)
+
+                for q in range(c.K):
+                    if q == k:
+                        continue
+                    Qkq = QkqMat[k, q]  # number of common sources between k and q
+                    # Update the k SCM with respect to incoming signal from q
+                    yqb = y[q][:Qkq, :]  # signal transmitted by q to k (Qkq x N)
+                    Rykyqb[k][q].update(_inner(y[k], yqb))
+
+                    # Update the k SCM of all contributions _but_ those of
+                    # the common sources between k and q
+                    gkq = get_gkq(k, q, Amat, Bmat, latd, latn, oMatd, oMatn)
+                    Rykykmq[k][q].update(_inner(y[k] - gkq))
+                    Gam = np.linalg.inv(Rykykmq[k][q].val)
+
+                    # LCMV beamformer
+                    Rykyqb_ = Rykyqb[k][q].val  # alias for conciseness
+                    Pkq[k][q]['LCMV'] = Gam @ Rykyqb_ @\
+                        np.linalg.inv(Rykyqb_.T @ Gam @ Rykyqb_)  # (Mk x Qkq)
+                    # Normalize LCMV weights
+                    Pkq[k][q]['LCMV'] /= np.linalg.norm(Pkq[k][q]['LCMV'])
+                    Pkq[k][q]['Simple'] = Lam @ Rykyqb_
+
+                    # --- dMWF original definition ---
+                    Rgkq[k][q].update(_inner(gkq))
+                    Ekloc = np.zeros((c.Mk, Qkq))
+                    Ekloc[:Qkq, :] = np.eye(Qkq)
+                    Pkq[k][q]['dMWF'] = Lam @ Rgkq[k][q].val @ Ekloc # (Mk x Qkq)
+                    
+                    pass
+                    # Fused signals
+                    for BFtype in zkq.keys():
+                        zkq[BFtype]['y'][k][q] = Pkq[k][q][BFtype].T @ y[k]
+                        zkq[BFtype]['s'][k][q] = Pkq[k][q][BFtype].T @ s[k]
+        
+            # Compute target MWF at each node
+            dhatk = dict([
+                (BFtype, [None for _ in range(c.K)])
+                for BFtype in allAlgos
+            ])
+
+            for k in range(c.K):
+                for BFtype in zkq.keys():
+                    RtyCurr = Rty[BFtype][k]
+                    RtsCurr = Rts[BFtype][k]
+                    ty = self.build_tilde(y[k], zkq[BFtype]['y'], k)
+                    ts = self.build_tilde(s[k], zkq[BFtype]['s'], k)
+                    # Update the tilde SCMs
+                    RtyCurr.update(_inner(ty))
+                    RtsCurr.update(_inner(ts))
+                    # Selection vector
+                    tE = np.zeros((RtyCurr.val.shape[0], c.D))
+                    tE[:c.D, :] = np.eye(c.D)
+                    tWk = np.linalg.inv(RtyCurr.val) @ RtsCurr.val @ tE
+                    # Compute target signal estimate
+                    dhatk[BFtype][k] = tWk.T @ ty
+
+            # Compute centralized and local MWFs
+            yc = np.concatenate(y, axis=0)
+            sc = np.concatenate(s, axis=0)
+            # Update centralized SCMs
+            Ryy.update(_inner(yc))
+            Rss.update(_inner(sc))
+            dhatk['Centralized'] = [None for _ in range(c.K)]
+            dhatk['Local'] = [None for _ in range(c.K)]
+            for k in range(c.K):
+                Ek = np.zeros((Ryy.val.shape[0], c.D))
+                Ek[k * c.Mk:k * c.Mk + c.D, :] = np.eye(c.D)
+                Wk = np.linalg.inv(Ryy.val) @ Rss.val @ Ek
+                dhatk['Centralized'][k] = Wk.T @ yc
+                # Local MWF (Rykyk already updated in first k-loop)
+                Rsksk[k].val = Rss.val[
+                    k * c.Mk:(k + 1) * c.Mk,
+                    k * c.Mk:(k + 1) * c.Mk
+                ]
+                assert np.allclose(Rykyk[k].val, Ryy.val[
+                    k * c.Mk:(k + 1) * c.Mk,
+                    k * c.Mk:(k + 1) * c.Mk
+                ]), "Rykyk and Ryy[k...] are not equal!"
+                Ekk = np.zeros((Rykyk[k].val.shape[0], c.D))
+                Ekk[:c.D, :] = np.eye(c.D)
+                Wkloc = np.linalg.inv(Rykyk[k].val) @ Rsksk[k].val @ Ekk
+                dhatk['Local'][k] = Wkloc.T @ y[k]
+
+            # Compute unprocessed MSEd
+            dhatk['Unprocessed'] = [y[k][:c.D, :] for k in range(c.K)]  # unprocessed signal
+
+            # Compute MSE_d for current frame
+            for BFtype, dh in dhatk.items():
+                if msed[BFtype] is None:
+                    msed[BFtype][l, :] = [None for _ in range(c.K)]
+                msed[BFtype][l, :] = [
+                    np.mean(dh[k] - d[k]) ** 2
+                    for k in range(c.K)
+                ]
+            
+            # profiler.stop()
+            # print(profiler.output_text(unicode=True, color=True))
+            # pass
 
         return msed
         
@@ -303,12 +530,12 @@ class Run:
         s = self.scms  # alias for convenience
         # Latent SCMs
         # s.Rsslat = latd @ latd.T / c.N
-        s.Rsslat = np.diag(np.diag(latd @ latd.T / c.N))
+        s.Rsslat = np.diag(np.diag(latd @ latd.T / c.Nbatch))
         # s.Rnnlat = latn @ latn.T / c.N
-        s.Rnnlat = np.diag(np.diag(latn @ latn.T / c.N))
+        s.Rnnlat = np.diag(np.diag(latn @ latn.T / c.Nbatch))
         snall = np.concatenate(sn, axis=0)
         # s.Rvv = snall @ snall.T / c.N
-        s.Rvv = np.diag(np.diag(snall @ snall.T / c.N))
+        s.Rvv = np.diag(np.diag(snall @ snall.T / c.Nbatch))
         Rvkvk = [s.Rvv[k * c.Mk:(k + 1) * c.Mk, k * c.Mk:(k + 1) * c.Mk] for k in range(c.K)]
         # Initialize lists
         Ak_q = [[None for _ in range(c.K)] for _ in range(c.K)]
@@ -392,3 +619,14 @@ class Run:
         # Centralized SCMs
         s.Ryy = Ac @ s.Rsslat @ Ac.T + Bc @ s.Rnnlat @ Bc.T + s.Rvv
         s.Rss = Ac @ s.Rsslat @ Ac.T
+
+def get_gkq(k, q, Amat, Bmat, latd, latn, oMatd, oMatn):
+    """
+    Compute the kq-pair-specific common sources contributions to the
+    microphone signal yk.
+    """
+    iComkqd = np.where(oMatd[:, k] & oMatd[:, q])[0]
+    iComkqn = np.where(oMatn[:, k] & oMatn[:, q])[0]
+    skq = Amat[k][:, iComkqd] @ latd[iComkqd, :]
+    nkq = Bmat[k][:, iComkqn] @ latn[iComkqn, :]
+    return skq + nkq  # <-- used for `Rgkq`

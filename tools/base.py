@@ -16,7 +16,10 @@ class Parameters:
     D: int = 1      # number of target signal channels at every node
     Qd: int = 5     # number of desired sources in environment
     Qn: int = 3     # number of noise sources in environment
-    N: int = int(1e4)    # number of samples
+    Nbatch: int = int(1e4)    # number of samples for batch processing
+    Nonline: int = int(1e2)    # number of samples for online processing (frame length)
+    nFrames: int = int(1e2)    # number of time frames (only for online processing)
+    beta: float = 0.995    # exponential averaging factor (only for online processing)
     scmEst: str = 'theoretical'    # type of SCM estimation method ('theoretical', 'batch', or 'online')
 
     seed: int = 42  # random number generator seed

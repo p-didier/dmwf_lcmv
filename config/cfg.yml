@@ -3,10 +3,13 @@ Mk: 10    # number of sensors per node (same for all nodes)
 D: 1      # number of target signal channels at every node
 Qd: 5     # number of desired sources in environment
 Qn: 5     # number of noise sources in environment
-N: 10000    # number of samples
+Nbatch: 10000    # number of samples for batch processing
+Nonline: 100    # number of samples for online processing (frame length)
+nFrames: 100    # number of time frames (only for online processing)
+beta: 0.999    # exponential averaging factor (only for online processing)
 # Type of SCM estimation method ('theoretical' or 'batch')
 # scmEst: theoretical
-# scmEst: batch
-scmEst: online
+scmEst: batch
+# scmEst: online
 
 seed: 42  # random number generator seed (for 1st MC run)
