@@ -22,6 +22,7 @@ plt.ion()  # interactive mode on
 pathToData = f'{Path(__file__).parent}/out/data/'
 DATA_FILE = f'{pathToData}/run_20250401_093538_batch.pkl'
 DATA_FILE = f'{pathToData}/run_20250401_094835_online.pkl'
+DATA_FILE = f'{pathToData}/run_20250401_144200_wDANSE_seq.pkl'
 
 PALETTE = mypalettes.get_palette('seabed')
 
@@ -60,18 +61,19 @@ def plot_online(msed):
     paletteCurr = discretized_palette(PALETTE, len(msed[0].keys()))
     markers = ['o', 's', '^', 'D', 'x', 'v', 'p', '*']
 
-    order = [
-        'Unprocessed',
-        'Local',
-        'dMWF',
-        'LCMV',
-        'Simple',
-        'Centralized'
-    ]
+    order = {
+        'Unprocessed': 'Unprocessed',
+        'Local': 'Local MWF',
+        'dMWF': 'dMWF as in [1]',
+        # 'LCMV',
+        'Simple': 'dMWF with proposed fusion',
+        'DANSE': 'DANSE (sequential)',
+        'Centralized': 'Centralized'
+    }
 
     fig, axes = plt.subplots(1, 1)
     fig.set_size_inches(7, 3.5)
-    for ii, BFtype in enumerate(order):
+    for ii, BFtype in enumerate(order.keys()):
         # Data
         data = np.mean(
             np.array([msed[jj][BFtype] for jj in range(len(msed))]),
@@ -88,7 +90,7 @@ def plot_online(msed):
             col = 'k'
         axes.plot(
             m,
-            label=BFtype,
+            label=order[BFtype],
             color=col,
             marker=markers[ii % len(markers)],
             markersize=5,
@@ -104,7 +106,7 @@ def plot_online(msed):
     axes.set_xlabel('Frame index')
     axes.set_ylabel('MSE_d [dB]')
     axes.set_xlim([0, 100])
-    axes.legend()
+    # axes.legend()
     # axes.set_title(f'MSE_d over {len(msed)} MC runs (averages over {msed[0]["Unprocessed"].shape[-1]} nodes)')
     fig.tight_layout()
     # Turn off outer edges

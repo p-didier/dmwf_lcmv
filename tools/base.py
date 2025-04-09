@@ -22,9 +22,11 @@ class Parameters:
     upEvery: int = 1    # number of time frames between consecutive updates of the fusion matrices (only for online processing)
     beta: float = 0.995    # exponential averaging factor (only for online processing)
     scmEst: str = 'theoretical'    # type of SCM estimation method ('theoretical', 'batch', or 'online')
+    upScmEveryNode: bool = True    # if True, update the SCM estimate at every node at each iteration (used iff `scmEst == 'online'`)
 
     seed: int = 42  # random number generator seed
     outputDir: str = ""  # path to output directory
+    suffix: str = ""  # suffix for export file name
 
     def __post_init__(self):
         np.random.seed(self.seed)

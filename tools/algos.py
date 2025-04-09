@@ -133,11 +133,15 @@ class Run:
         
     def build_tilde(self, yk, zkqCurr, kCurr):
         """Build \\tilde{y}_k (DANSE or dMWF)."""
-        zz = np.concatenate(
-            [zkqCurr[q][kCurr] for q in range(self.cfg.K) if q != kCurr],
+        zmk = np.concatenate(
+            [
+                zkqCurr[q][kCurr]
+                for q in range(self.cfg.K)
+                if q != kCurr
+            ],
             axis=0
         )
-        return np.concatenate([yk, zz], axis=0)
+        return np.concatenate([yk, zmk], axis=0)
 
     def build_Ck(self, k: int, Pkq: list[np.ndarray]):
         """
@@ -358,11 +362,18 @@ class Run:
             'LCMP': copy.deepcopy(baseDict),
             'Simple': copy.deepcopy(baseDict),
             'dMWF': copy.deepcopy(baseDict),
+            'DANSE': copy.deepcopy(baseDict),
         }
         Pkq = [[dict([
             (BFtype, np.random.randn(c.Mk, QkqMat[k, q]))
+            if BFtype != 'DANSE' else
+            (BFtype, np.random.randn(c.Mk, c.Qd))
             for BFtype in zkq.keys()
         ]) for q in range(c.K)] for k in range(c.K)]
+        tWk = [  # DANSE filter \tilde{W}_k
+            np.random.randn(c.Mk + c.Qd * (c.K - 1), c.Qd)
+            for _ in range(c.K)
+        ]
         # SCMs
         Ryy = SCM(beta=c.beta)
         Rss = SCM(beta=c.beta)
@@ -385,8 +396,8 @@ class Run:
             (BFtype, np.zeros((c.nFrames, c.K))) for BFtype in allAlgos
         ])
 
-        testR = [[np.random.randn(QkqMat[k, q], c.Mk) for q in range(c.K)] for k in range(c.K)]
-
+        u = 0  # updating node index DANSE
+        
         for l in range(c.nFrames):
             print(f"Frame {l + 1}/{c.nFrames}...", end='\r')
             # Compute signals for current frame
@@ -400,7 +411,9 @@ class Run:
             for k in range(c.K):
                 
                 # Update the local SCM
-                Rykyk[k].update(_inner(y[k]))
+                if c.upScmEveryNode or k == u:
+                    Rykyk[k].update(_inner(y[k]))
+                
                 Lam = np.linalg.inv(Rykyk[k].val)
 
                 for q in range(c.K):
@@ -408,37 +421,31 @@ class Run:
                         continue
                     Qkq = QkqMat[k, q]  # number of common sources between k and q
                     # Update the k SCM with respect to incoming signal from q
-                    yqb = y[q][:Qkq, :]  # signal transmitted by q to k (Qkq x N)
-                    Rykyqb[k][q].update(_inner(y[k], yqb))
-                    # Rykyqb[k][q].update(_inner(y[k], testR[k][q] @ y[q]))
-                    # Rykyqb[k][q].update(_inner(
-                    #     y[k],
-                    #     (
-                    #         np.linalg.pinv(Pkq[q][k]['Simple']).T @\
-                    #             zkq['Simple']['y'][q][k]
-                    #     )[:Qkq, :]
-                    # ))
-                    # Rykyqb[k][q].update(_inner(y[k], zkq['LCMP']['y'][q][k]))
-                    
+                    if c.upScmEveryNode or k == u:
+                        yqb = y[q][:Qkq, :]  # signal transmitted by q to k (Qkq x N)
+                        Rykyqb[k][q].update(_inner(y[k], yqb))
 
                     # Update the k SCM of all contributions _but_ those of
                     # the common sources between k and q
                     gkq = get_gkq(k, q, Amat, Bmat, latd, latn, oMatd, oMatn)
-                    Rykykmq[k][q].update(_inner(y[k] - gkq))
+                    # Rykykmq[k][q].update(_inner(y[k] - gkq))
 
                     if l % c.upEvery == 0:
                         Rykyqb_ = Rykyqb[k][q].val  # alias for conciseness
-                        Gam = np.linalg.inv(Rykykmq[k][q].val)
-                        Pkq[k][q]['LCMV'] = Gam @ Rykyqb_ @\
-                            np.linalg.inv(Rykyqb_.T @ Gam @ Rykyqb_)  # (Mk x Qkq)
-                        Pkq[k][q]['LCMV'] /= np.linalg.norm(Pkq[k][q]['LCMV'])
+                        # Gam = np.linalg.inv(Rykykmq[k][q].val)
+                        # Pkq[k][q]['LCMV'] = Gam @ Rykyqb_ @\
+                        #     np.linalg.inv(Rykyqb_.T @ Gam @ Rykyqb_)  # (Mk x Qkq)
+                        # Pkq[k][q]['LCMV'] /= np.linalg.norm(Pkq[k][q]['LCMV'])
                         Pkq[k][q]['Simple'] = Lam @ Rykyqb_
-                        Pkq[k][q]['LCMP'] = Lam @ Rykyqb_ @\
-                            np.linalg.inv(Rykyqb_.T @ Lam @ Rykyqb_)  # (Mk x Qkq)
-                        Pkq[k][q]['LCMP'] /= np.linalg.norm(Pkq[k][q]['LCMP'])
+                        # Pkq[k][q]['LCMP'] = Lam @ Rykyqb_ @\
+                        #     np.linalg.inv(Rykyqb_.T @ Lam @ Rykyqb_)  # (Mk x Qkq)
+                        # Pkq[k][q]['LCMP'] /= np.linalg.norm(Pkq[k][q]['LCMP'])
+                        if k == u:
+                            Pkq[k][q]['DANSE'] = copy.deepcopy(tWk[k][:c.Mk, :])
 
                     # --- dMWF original definition ---
-                    Rgkq[k][q].update(_inner(gkq))
+                    if c.upScmEveryNode or k == u:
+                        Rgkq[k][q].update(_inner(gkq))
                     Ekloc = np.zeros((c.Mk, Qkq))
                     Ekloc[:Qkq, :] = np.eye(Qkq)
                     Pkq[k][q]['dMWF'] = Lam @ Rgkq[k][q].val @ Ekloc # (Mk x Qkq)
@@ -448,6 +455,9 @@ class Run:
                     for BFtype in zkq.keys():
                         zkq[BFtype]['y'][k][q] = Pkq[k][q][BFtype].T @ y[k]
                         zkq[BFtype]['s'][k][q] = Pkq[k][q][BFtype].T @ s[k]
+                        if BFtype == 'DANSE':
+                            if zkq[BFtype]['y'][k][q].shape[0] == 1:
+                                pass
         
             # Compute target MWF at each node
             dhatk = dict([
@@ -462,14 +472,20 @@ class Run:
                     ty = self.build_tilde(y[k], zkq[BFtype]['y'], k)
                     ts = self.build_tilde(s[k], zkq[BFtype]['s'], k)
                     # Update the tilde SCMs
-                    RtyCurr.update(_inner(ty))
-                    RtsCurr.update(_inner(ts))
+                    if c.upScmEveryNode or k == u:
+                        RtyCurr.update(_inner(ty))
+                        RtsCurr.update(_inner(ts))
                     # Selection vector
+                    tWkFull = np.linalg.inv(RtyCurr.val) @ RtsCurr.val 
                     tE = np.zeros((RtyCurr.val.shape[0], c.D))
                     tE[:c.D, :] = np.eye(c.D)
-                    tWk = np.linalg.inv(RtyCurr.val) @ RtsCurr.val @ tE
+                    tWkCurr = tWkFull @ tE
+                    if BFtype == 'DANSE' and k == u:
+                        tE2 = np.zeros((RtyCurr.val.shape[0], c.Qd))
+                        tE2[:c.Qd, :] = np.eye(c.Qd)
+                        tWk[k] = tWkFull @ tE2  # store for DANSE
                     # Compute target signal estimate
-                    dhatk[BFtype][k] = tWk.T @ ty
+                    dhatk[BFtype][k] = tWkCurr.T @ ty
 
             # Compute centralized and local MWFs
             yc = np.concatenate(y, axis=0)
@@ -513,6 +529,8 @@ class Run:
             # profiler.stop()
             # print(profiler.output_text(unicode=True, color=True))
             # pass
+
+            u = (u + 1) % c.K  # update node index for DANSE
 
         return msed
         

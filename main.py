@@ -16,6 +16,7 @@ import numpy as np
 from tools.algos import *
 from tools.base import *
 from pyinstrument import Profiler
+from humanfriendly import format_timespan
 
 import matplotlib as mpl
 mpl.use('TkAgg')  # use TkAgg backend to avoid issues when plotting
@@ -24,7 +25,7 @@ plt.ion()  # interactive mode on
 
 PATH_TO_CFG = ".\\config\\cfg.yml"  # Path to the configuration file
 
-NMC = 100  # number of Monte Carlo runs
+NMC = 10  # number of Monte Carlo runs
 
 def main():
     """Main function (called by default when running script)."""
@@ -42,11 +43,12 @@ def main():
         cfg.seed += 1  # change seed for each run
         # Launch the simulation
         msed.append(Run(cfg).launch())
-        print(f"Monte Carlo run {ii + 1}/{NMC} completed (total time: {time.time() - t0:.2f} s).", end='\r')
+        # Time in readable format
+        print(f"Monte Carlo run {ii + 1}/{NMC} completed (total time: {format_timespan(time.time() - t0)}).", end='\r')
     print("\nAll Monte Carlo runs completed.")
 
     # Export
-    with open(f'./out/data/run_{time.strftime("%Y%m%d_%H%M%S")}.pkl', 'wb') as f:
+    with open(f'./out/data/run_{time.strftime("%Y%m%d_%H%M%S")}{cfg.suffix}.pkl', 'wb') as f:
         pickle.dump(msed, f)
 
     return 0
