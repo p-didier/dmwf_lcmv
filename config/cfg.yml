@@ -7,12 +7,15 @@ Nbatch: 10000    # number of samples for batch processing
 Nonline: 100    # number of samples for online processing (frame length)
 nFrames: 1000    # number of time frames (only for online processing)
 upEvery: 1    # number of time frames between consecutive updates of the fusion matrices (only for online processing)
-beta: 0.999    # exponential averaging factor (only for online processing)
+beta: 0.99    # exponential averaging factor (only for online processing)
 # Type of SCM estimation method ('theoretical' or 'batch')
 # scmEst: theoretical
 # scmEst: batch
 scmEst: online
-upScmEveryNode: False
+upScmEveryNode: True
+# upScmEveryNode: False
+foss: True    # if True, ensure fully overlapping source observability 
 
 seed: 42  # random number generator seed (for 1st MC run)
-suffix: _justUpnode  # suffix for export file name
+# suffix: _justUpnode  # suffix for export file name
+suffix: _allNodes  # suffix for export file name

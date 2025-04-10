@@ -178,15 +178,19 @@ class Run:
     def obs_matrices(self):
         """Generate random observability matrices."""
         c = self.cfg  # alias for convenience
-        oMatd = np.random.randint(0, 2, (c.Qd, c.K))
-        oMatn = np.random.randint(0, 2, (c.Qn, c.K))
-        # Ensure that at each source is observed by at least one node
-        for i in range(c.Qd):
-            if np.sum(oMatd[i, :]) == 0:
-                oMatd[i, np.random.randint(0, c.K)] = 1
-        for i in range(c.Qn):
-            if np.sum(oMatn[i, :]) == 0:
-                oMatn[i, np.random.randint(0, c.K)] = 1
+        if c.foss:
+            oMatd = np.ones((c.Qd, c.K), dtype=int)
+            oMatn = np.ones((c.Qn, c.K), dtype=int)
+        else:
+            oMatd = np.random.randint(0, 2, (c.Qd, c.K))
+            oMatn = np.random.randint(0, 2, (c.Qn, c.K))
+            # Ensure that at each source is observed by at least one node
+            for i in range(c.Qd):
+                if np.sum(oMatd[i, :]) == 0:
+                    oMatd[i, np.random.randint(0, c.K)] = 1
+            for i in range(c.Qn):
+                if np.sum(oMatn[i, :]) == 0:
+                    oMatn[i, np.random.randint(0, c.K)] = 1
         return oMatd, oMatn
         
     def launch(self):
@@ -455,8 +459,7 @@ class Run:
                         # Pkq[k][q]['LCMP'] = Lam @ Rykyqb_ @\
                         #     np.linalg.inv(Rykyqb_.T @ Lam @ Rykyqb_)  # (Mk x Qkq)
                         # Pkq[k][q]['LCMP'] /= np.linalg.norm(Pkq[k][q]['LCMP'])
-                        if k == u:
-                            Pkq[k][q]['DANSE'] = copy.deepcopy(tWk[k][:c.Mk, :])
+                        Pkq[k][q]['DANSE'] = tWk[k][:c.Mk, :]
 
                     # --- dMWF original definition ---
                     if c.upScmEveryNode or k == u:
@@ -470,9 +473,6 @@ class Run:
                     for BFtype in zkq.keys():
                         zkq[BFtype]['y'][k][q] = Pkq[k][q][BFtype].T @ y[k]
                         zkq[BFtype]['s'][k][q] = Pkq[k][q][BFtype].T @ s[k]
-                        if BFtype == 'DANSE':
-                            if zkq[BFtype]['y'][k][q].shape[0] == 1:
-                                pass
         
             # Compute target MWF at each node
             dhatk = dict([
@@ -498,7 +498,7 @@ class Run:
                     if BFtype == 'DANSE' and k == u:
                         tE2 = np.zeros((RtyCurr.val.shape[0], c.Qd))
                         tE2[:c.Qd, :] = np.eye(c.Qd)
-                        tWk[k] = tWkFull @ tE2  # store for DANSE
+                        tWk[k] = tWkFull @ tE2  # store for DANSE fusion
                     # Compute target signal estimate
                     dhatk[BFtype][k] = tWkCurr.T @ ty
 
