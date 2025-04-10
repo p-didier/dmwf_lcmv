@@ -7,18 +7,20 @@ import copy
 import numpy as np
 from .base import Parameters
 import matplotlib.pyplot as plt
-from pyinstrument import Profiler
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 @dataclass
 class SCM:
     val: np.ndarray = None
     beta: float = 0.995  # Exponential averaging factor
+    dim: tuple[int] = (1, 1)  # SCM dimension [dim x dim]
     def update(self, yyH: np.ndarray):
         """Update the spatial covariance matrix using exponential averaging."""
         if self.val is None:
             # SCM not yet initialized. Do it now
-            self.val = np.zeros_like(yyH)
+            if isinstance(self.dim, int) or len(self.dim) == 1:
+                self.dim = (self.dim, self.dim)
+            self.val = np.zeros(self.dim)
         self.val = self.beta * self.val + (1 - self.beta) * yyH
 
 @dataclass
@@ -374,17 +376,30 @@ class Run:
             np.random.randn(c.Mk + c.Qd * (c.K - 1), c.Qd)
             for _ in range(c.K)
         ]
-        # SCMs
-        Ryy = SCM(beta=c.beta)
-        Rss = SCM(beta=c.beta)
-        baseList = [SCM(beta=c.beta) for _ in range(c.K)]
-        Rty = dict([(BFtype, copy.deepcopy(baseList)) for BFtype in zkq.keys()])
+        # SCMs initialization
+        Ryy = SCM(dim=c.M, beta=c.beta)
+        Rss = copy.deepcopy(Ryy)
+        Rty = dict()
+        for BFtype in zkq.keys():
+            if BFtype == 'DANSE':
+                Rty[BFtype] = [
+                    SCM(dim=c.Mk + c.Qd * (c.K - 1), beta=c.beta)
+                    for _ in range(c.K)
+                ]
+            else:
+                Rty[BFtype] = [
+                    SCM(dim=c.Mk + int(np.sum(QkqMat[q, :]) - QkqMat[q, q]), beta=c.beta)
+                    for q in range(c.K)
+                ]
         Rts = copy.deepcopy(Rty)
-        Rykyk = copy.deepcopy(baseList)
+        Rykyk = [SCM(dim=c.Mk, beta=c.beta) for _ in range(c.K)]
         Rsksk = copy.deepcopy(Rykyk)
-        Rykyqb = [copy.deepcopy(baseList) for _ in range(c.K)]
-        Rykykmq = copy.deepcopy(Rykyqb)
-        Rgkq = copy.deepcopy(Rykyqb)
+        Rykyqb = [
+            [SCM(dim=(c.Mk, QkqMat[k, q]), beta=c.beta) for q in range(c.K)]
+            for k in range(c.K)
+        ]
+        Rykykmq = [copy.deepcopy(Rykyk) for _ in range(c.K)]
+        Rgkq = [copy.deepcopy(Rykyk) for _ in range(c.K)]
 
         def _inner(x1, x2=None):
             if x2 is None:
