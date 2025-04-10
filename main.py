@@ -44,7 +44,7 @@ def main():
         # Launch the simulation
         msed.append(Run(cfg).launch())
         # Time in readable format
-        print(f"Monte Carlo run {ii + 1}/{NMC} completed (total time: {format_timespan(time.time() - t0)}).", end='\r')
+        print(f"\nMonte Carlo run {ii + 1}/{NMC} completed (total time: {format_timespan(time.time() - t0)}).")
     print("\nAll Monte Carlo runs completed.")
 
     # Export

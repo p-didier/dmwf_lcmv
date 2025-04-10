@@ -5,6 +5,7 @@
 
 import copy
 import numpy as np
+import scipy.linalg as sla
 from .base import Parameters
 import matplotlib.pyplot as plt
 from dataclasses import dataclass
@@ -14,13 +15,24 @@ class SCM:
     val: np.ndarray = None
     beta: float = 0.995  # Exponential averaging factor
     dim: tuple[int] = (1, 1)  # SCM dimension [dim x dim]
-    def update(self, yyH: np.ndarray):
-        """Update the spatial covariance matrix using exponential averaging."""
+
+    def __post_init__(self):
         if self.val is None:
             # SCM not yet initialized. Do it now
             if isinstance(self.dim, int) or len(self.dim) == 1:
-                self.dim = (self.dim, self.dim)
-            self.val = np.zeros(self.dim)
+                if isinstance(self.dim, tuple):
+                    self.dim = list(self.dim)[0]
+                self.val = 1e-8 * np.eye(self.dim)
+            else:
+                if self.dim[0] >= self.dim[1]:
+                    self.val = 1e-8 * np.eye(self.dim[0])
+                    self.val = self.val[:, :self.dim[1]]
+                elif self.dim[0] >= self.dim[1]:
+                    self.val = 1e-8 * np.eye(self.dim[1])
+                    self.val = self.val[:self.dim[0], :]
+    
+    def update(self, yyH: np.ndarray):
+        """Update the spatial covariance matrix using exponential averaging."""
         self.val = self.beta * self.val + (1 - self.beta) * yyH
 
 @dataclass
@@ -128,14 +140,26 @@ class Run:
         sn = [np.random.randn(c.Mk, nSamples) for _ in range(c.K)]
         # Microphone signals
         s = [Amat[k] @ latd for k in range(c.K)]  # desired sources contribution
-        n = [Bmat[k] @ latn for k in range(c.K)]  # noise sources contribution
+        n = [Bmat[k] @ latn + sn[k] for k in range(c.K)]  # noise sources contribution
         d = [s[k][:c.D, :] for k in range(c.K)]  # target signals
-        y = [s[k] + n[k] + sn[k] for k in range(c.K)]  # microphone signals
-        return y, s, d, n, latd, latn, sn
+        y = [s[k] + n[k] for k in range(c.K)]  # microphone signals
+        return y, s, d, n, latd, latn
         
     def build_tilde(self, yk, zkqCurr, kCurr):
         """Build \\tilde{y}_k (DANSE or dMWF)."""
         zmk = np.concatenate(
+            [
+                zkqCurr[q][kCurr]
+                for q in range(self.cfg.K)
+                if q != kCurr
+            ],
+            axis=0
+        )
+        return np.concatenate([yk, zmk], axis=0)
+    
+    def build_tilde_ti(self, yk, zkqCurr, kCurr):
+        """Build \\tilde{y}_k (TI-DANSE)."""
+        zmk = np.sum(
             [
                 zkqCurr[q][kCurr]
                 for q in range(self.cfg.K)
@@ -211,7 +235,7 @@ class Run:
 
         # Compute signals at once
         Amat, Bmat = self._get_steering_matrices(oMatd, oMatn)
-        y, s, d, n, latd, latn, sn =\
+        y, s, d, n, latd, latn =\
             self._get_latent_sigs(
                 nSamples=c.Nbatch,
                 Amat=Amat,
@@ -226,8 +250,8 @@ class Run:
         }
         zkq = {
             'LCMV': baseDict,
-            'Simple': copy.deepcopy(baseDict),
             'dMWF': copy.deepcopy(baseDict),
+            'iDANSE': copy.deepcopy(baseDict),
         }
         Pkq = [[{} for _ in range(c.K)] for _ in range(c.K)]
         for k in range(c.K):
@@ -252,7 +276,7 @@ class Run:
                 # LCMV beamformer
                 Pkq[k][q]['LCMV'] = Gam @ Rykyqb @\
                     np.linalg.inv(Rykyqb.T @ Gam @ Rykyqb)  # (Mk x Qkq)
-                Pkq[k][q]['Simple'] = Lam @ Rykyqb
+                Pkq[k][q]['dMWF'] = Lam @ Rykyqb
 
                 # --- dMWF original definition ---
                 if c.scmEst == 'theoretical':
@@ -261,7 +285,7 @@ class Run:
                     Rgkq = gkq @ gkq.T / c.Nbatch
                 Ekloc = np.zeros((c.Mk, Qkq))
                 Ekloc[:Qkq, :] = np.eye(Qkq)
-                Pkq[k][q]['dMWF'] = np.linalg.inv(Rykyk) @\
+                Pkq[k][q]['iDANSE'] = np.linalg.inv(Rykyk) @\
                     Rgkq @ Ekloc # (Mk x Qkq)
                 
                 pass
@@ -362,17 +386,20 @@ class Run:
                 [np.random.randn(QkqMat[k, q], c.Nonline) for q in range(c.K)]
                 for k in range(c.K)
             ],
+            'n': [
+                [np.random.randn(QkqMat[k, q], c.Nonline) for q in range(c.K)]
+                for k in range(c.K)
+            ],
         }
         zkq = {
-            'LCMV': baseDict,
-            'LCMP': copy.deepcopy(baseDict),
-            'Simple': copy.deepcopy(baseDict),
             'dMWF': copy.deepcopy(baseDict),
+            'iDANSE': copy.deepcopy(baseDict),
             'DANSE': copy.deepcopy(baseDict),
+            # 'TI-DANSE': copy.deepcopy(baseDict),
         }
         Pkq = [[dict([
             (BFtype, np.random.randn(c.Mk, QkqMat[k, q]))
-            if BFtype != 'DANSE' else
+            if 'DANSE' not in BFtype else
             (BFtype, np.random.randn(c.Mk, c.Qd))
             for BFtype in zkq.keys()
         ]) for q in range(c.K)] for k in range(c.K)]
@@ -380,14 +407,24 @@ class Run:
             np.random.randn(c.Mk + c.Qd * (c.K - 1), c.Qd)
             for _ in range(c.K)
         ]
+        tWkTI = [  # TI-DANSE filter \tilde{W}_k
+            np.random.randn(c.Mk + c.Qd, c.Qd)
+            for _ in range(c.K)
+        ]
         # SCMs initialization
         Ryy = SCM(dim=c.M, beta=c.beta)
         Rss = copy.deepcopy(Ryy)
+        Rnn = copy.deepcopy(Ryy)
         Rty = dict()
         for BFtype in zkq.keys():
             if BFtype == 'DANSE':
                 Rty[BFtype] = [
                     SCM(dim=c.Mk + c.Qd * (c.K - 1), beta=c.beta)
+                    for _ in range(c.K)
+                ]
+            elif BFtype == 'TI-DANSE':
+                Rty[BFtype] = [
+                    SCM(dim=c.Mk + c.Qd, beta=c.beta)
                     for _ in range(c.K)
                 ]
             else:
@@ -396,13 +433,13 @@ class Run:
                     for q in range(c.K)
                 ]
         Rts = copy.deepcopy(Rty)
+        Rtn = copy.deepcopy(Rty)
         Rykyk = [SCM(dim=c.Mk, beta=c.beta) for _ in range(c.K)]
         Rsksk = copy.deepcopy(Rykyk)
         Rykyqb = [
             [SCM(dim=(c.Mk, QkqMat[k, q]), beta=c.beta) for q in range(c.K)]
             for k in range(c.K)
         ]
-        Rykykmq = [copy.deepcopy(Rykyk) for _ in range(c.K)]
         Rgkq = [copy.deepcopy(Rykyk) for _ in range(c.K)]
 
         def _inner(x1, x2=None):
@@ -420,7 +457,7 @@ class Run:
         for l in range(c.nFrames):
             print(f"Frame {l + 1}/{c.nFrames}...", end='\r')
             # Compute signals for current frame
-            y, s, d, n, latd, latn, sn =\
+            y, s, d, n, latd, latn =\
                 self._get_latent_sigs(
                     nSamples=c.Nonline,  # <-- ONLY c.Nonline samples per channel
                     Amat=Amat,
@@ -450,29 +487,24 @@ class Run:
                     # Rykykmq[k][q].update(_inner(y[k] - gkq))
 
                     if l % c.upEvery == 0:
-                        Rykyqb_ = Rykyqb[k][q].val  # alias for conciseness
-                        # Gam = np.linalg.inv(Rykykmq[k][q].val)
-                        # Pkq[k][q]['LCMV'] = Gam @ Rykyqb_ @\
-                        #     np.linalg.inv(Rykyqb_.T @ Gam @ Rykyqb_)  # (Mk x Qkq)
-                        # Pkq[k][q]['LCMV'] /= np.linalg.norm(Pkq[k][q]['LCMV'])
-                        Pkq[k][q]['Simple'] = Lam @ Rykyqb_
-                        # Pkq[k][q]['LCMP'] = Lam @ Rykyqb_ @\
-                        #     np.linalg.inv(Rykyqb_.T @ Lam @ Rykyqb_)  # (Mk x Qkq)
-                        # Pkq[k][q]['LCMP'] /= np.linalg.norm(Pkq[k][q]['LCMP'])
+                        Pkq[k][q]['dMWF'] = Lam @ Rykyqb[k][q].val
                         Pkq[k][q]['DANSE'] = tWk[k][:c.Mk, :]
+                        # Pkq[k][q]['TI-DANSE'] = tWkTI[k][:c.Mk, :] @\
+                        #     np.linalg.inv(tWkTI[k][c.Mk:, :])
 
                     # --- dMWF original definition ---
                     if c.upScmEveryNode or k == u:
                         Rgkq[k][q].update(_inner(gkq))
                     Ekloc = np.zeros((c.Mk, Qkq))
                     Ekloc[:Qkq, :] = np.eye(Qkq)
-                    Pkq[k][q]['dMWF'] = Lam @ Rgkq[k][q].val @ Ekloc # (Mk x Qkq)
+                    Pkq[k][q]['iDANSE'] = Lam @ Rgkq[k][q].val @ Ekloc # (Mk x Qkq)
                     
                     pass
                     # Fused signals
                     for BFtype in zkq.keys():
                         zkq[BFtype]['y'][k][q] = Pkq[k][q][BFtype].T @ y[k]
                         zkq[BFtype]['s'][k][q] = Pkq[k][q][BFtype].T @ s[k]
+                        zkq[BFtype]['n'][k][q] = Pkq[k][q][BFtype].T @ n[k]
         
             # Compute target MWF at each node
             dhatk = dict([
@@ -484,49 +516,92 @@ class Run:
                 for BFtype in zkq.keys():
                     RtyCurr = Rty[BFtype][k]
                     RtsCurr = Rts[BFtype][k]
-                    ty = self.build_tilde(y[k], zkq[BFtype]['y'], k)
-                    ts = self.build_tilde(s[k], zkq[BFtype]['s'], k)
+                    RtnCurr = Rtn[BFtype][k]
+                    if BFtype == 'TI-DANSE':
+                        ty = self.build_tilde_ti(y[k], zkq[BFtype]['y'], k)
+                        ts = self.build_tilde_ti(s[k], zkq[BFtype]['s'], k)
+                        tn = self.build_tilde_ti(n[k], zkq[BFtype]['n'], k)
+                    else:
+                        ty = self.build_tilde(y[k], zkq[BFtype]['y'], k)
+                        ts = self.build_tilde(s[k], zkq[BFtype]['s'], k)
+                        tn = self.build_tilde(n[k], zkq[BFtype]['n'], k)
                     # Update the tilde SCMs
                     if c.upScmEveryNode or k == u:
                         RtyCurr.update(_inner(ty))
                         RtsCurr.update(_inner(ts))
-                    # Selection vector
-                    tWkFull = np.linalg.inv(RtyCurr.val) @ RtsCurr.val 
+                        RtnCurr.update(_inner(tn))
+                    # Filter update
+                    if fullrank(RtyCurr.val):
+                        tWkFull = filtup(
+                            RtyCurr.val,
+                            RtnCurr.val,
+                            gevd=c.gevd if BFtype not in ['dMWF', 'iDANSE'] else False,  # TODO: addess dMWF and iDANSE formulation for GEVD...
+                            gevdRank=c.Qd
+                        )
+                    else:
+                        tWkFull = np.eye(RtyCurr.val.shape[0])
                     tE = np.zeros((RtyCurr.val.shape[0], c.D))
                     tE[:c.D, :] = np.eye(c.D)
                     tWkCurr = tWkFull @ tE
-                    if BFtype == 'DANSE' and k == u:
+                    if k == u and l % c.upEvery == 0:
                         tE2 = np.zeros((RtyCurr.val.shape[0], c.Qd))
                         tE2[:c.Qd, :] = np.eye(c.Qd)
-                        tWk[k] = tWkFull @ tE2  # store for DANSE fusion
+                        if BFtype == 'DANSE':
+                            tWk[k] = tWkFull @ tE2  # store for DANSE fusion
+                        if BFtype == 'TI-DANSE':
+                            tWkTI[k] = tWkFull @ tE2  # store for TI-DANSE fusion
                     # Compute target signal estimate
                     dhatk[BFtype][k] = tWkCurr.T @ ty
 
             # Compute centralized and local MWFs
             yc = np.concatenate(y, axis=0)
             sc = np.concatenate(s, axis=0)
+            nc = np.concatenate(n, axis=0)
             # Update centralized SCMs
             Ryy.update(_inner(yc))
             Rss.update(_inner(sc))
+            Rnn.update(_inner(nc))
             dhatk['Centralized'] = [None for _ in range(c.K)]
             dhatk['Local'] = [None for _ in range(c.K)]
             for k in range(c.K):
                 Ek = np.zeros((Ryy.val.shape[0], c.D))
                 Ek[k * c.Mk:k * c.Mk + c.D, :] = np.eye(c.D)
-                Wk = np.linalg.inv(Ryy.val) @ Rss.val @ Ek
+                # Centralized filter update
+                if fullrank(Ryy.val):
+                    Wk = filtup(
+                        Ryy.val,
+                        Rnn.val,
+                        gevd=c.gevd,
+                        gevdRank=c.Qd
+                    ) @ Ek
+                else:
+                    Wk = np.eye(Ryy.val.shape[0])
                 dhatk['Centralized'][k] = Wk.T @ yc
                 # Local MWF (Rykyk already updated in first k-loop)
-                Rsksk[k].val = Rss.val[
+                RykykCurr = Ryy.val[
                     k * c.Mk:(k + 1) * c.Mk,
                     k * c.Mk:(k + 1) * c.Mk
                 ]
-                assert np.allclose(Rykyk[k].val, Ryy.val[
+                RskskCurr = Rss.val[
                     k * c.Mk:(k + 1) * c.Mk,
                     k * c.Mk:(k + 1) * c.Mk
-                ]), "Rykyk and Ryy[k...] are not equal!"
-                Ekk = np.zeros((Rykyk[k].val.shape[0], c.D))
+                ]
+                RnknkCurr = Rnn.val[
+                    k * c.Mk:(k + 1) * c.Mk,
+                    k * c.Mk:(k + 1) * c.Mk
+                ]
+                Ekk = np.zeros((RykykCurr.shape[0], c.D))
                 Ekk[:c.D, :] = np.eye(c.D)
-                Wkloc = np.linalg.inv(Rykyk[k].val) @ Rsksk[k].val @ Ekk
+                # Local filter update
+                if fullrank(RykykCurr):
+                    Wkloc = filtup(
+                        RykykCurr,
+                        RnknkCurr,
+                        gevd=c.gevd,
+                        gevdRank=c.Qd
+                    ) @ Ekk
+                else:
+                    Wkloc = np.eye(RykykCurr.shape[0])
                 dhatk['Local'][k] = Wkloc.T @ y[k]
 
             # Compute unprocessed MSEd
@@ -540,12 +615,9 @@ class Run:
                     np.mean(dh[k] - d[k]) ** 2
                     for k in range(c.K)
                 ]
-            
-            # profiler.stop()
-            # print(profiler.output_text(unicode=True, color=True))
-            # pass
 
-            u = (u + 1) % c.K  # update node index for DANSE
+            if l % c.upEvery == 0:
+                u = (u + 1) % c.K  # update node index for DANSE
 
         return msed
         
@@ -687,3 +759,28 @@ def get_gkq(k, q, Amat, Bmat, latd, latn, oMatd, oMatn):
     skq = Amat[k][:, iComkqd] @ latd[iComkqd, :]
     nkq = Bmat[k][:, iComkqn] @ latn[iComkqn, :]
     return skq + nkq  # <-- used for `Rgkq`
+
+def filtup(Ryy, Rnn, gevd=False, gevdRank=1):
+    """GEVD filter update for a single time- or frequency-line."""
+    if gevd:
+        try:
+            sigma, Xmat = sla.eigh(Ryy, Rnn)
+        except np.linalg.LinAlgError as error:
+            raise error
+        idx = np.flip(np.argsort(sigma))
+        sigma = sigma[idx]
+        Xmat = Xmat[:, idx]
+        # Inverse-hermitian of `Xmat`
+        Qmat = np.linalg.pinv(Xmat.T.conj())
+        # GEVLs tensor - low-rank approximation is done here
+        Dmat = np.zeros_like(Ryy)
+        for r in range(gevdRank):
+            Dmat[r, r] = np.squeeze(1 - 1 / sigma[r])
+        # Compute filters
+        return np.linalg.pinv(Qmat.T.conj()) @ Dmat @ Qmat.conj().T
+    else:
+        return np.linalg.inv(Ryy) @ (Ryy - Rnn)
+
+def fullrank(M):
+    """Check if a matrix is full rank."""
+    return np.linalg.matrix_rank(M) == min(M.shape)

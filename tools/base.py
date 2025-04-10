@@ -24,6 +24,7 @@ class Parameters:
     scmEst: str = 'theoretical'    # type of SCM estimation method ('theoretical', 'batch', or 'online')
     upScmEveryNode: bool = True    # if True, update the SCM estimate at every node at each iteration (used iff `scmEst == 'online'`)
     foss: bool = True    # if True, ensure fully overlapping source observability 
+    gevd: bool = True    # if True, use GEVD
 
     seed: int = 42  # random number generator seed
     outputDir: str = ""  # path to output directory

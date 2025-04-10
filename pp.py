@@ -22,7 +22,9 @@ plt.ion()  # interactive mode on
 pathToData = f'{Path(__file__).parent}/out/data/'
 DATA_FILE = f'{pathToData}/run_20250401_093538_batch.pkl'
 DATA_FILE = f'{pathToData}/run_20250401_094835_online.pkl'
-DATA_FILE = f'{pathToData}/run_20250401_144200_wDANSE_seq.pkl'
+DATA_FILE = f'{pathToData}/run_20250410_112428_allNodes.pkl'
+DATA_FILE = f'{pathToData}/run_20250410_113720_justUpnode_foss.pkl'
+
 
 PALETTE = mypalettes.get_palette('seabed')
 
@@ -105,8 +107,8 @@ def plot_online(msed):
         # )
     axes.set_xlabel('Frame index')
     axes.set_ylabel('MSE_d [dB]')
-    axes.set_xlim([0, 100])
-    # axes.legend()
+    # axes.set_xlim([0, 100])
+    axes.legend()
     # axes.set_title(f'MSE_d over {len(msed)} MC runs (averages over {msed[0]["Unprocessed"].shape[-1]} nodes)')
     fig.tight_layout()
     # Turn off outer edges
