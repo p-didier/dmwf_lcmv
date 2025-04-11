@@ -22,13 +22,13 @@ class SCM:
             if isinstance(self.dim, int) or len(self.dim) == 1:
                 if isinstance(self.dim, tuple):
                     self.dim = list(self.dim)[0]
-                self.val = 1e-8 * np.eye(self.dim)
+                self.val = np.eye(self.dim)
             else:
                 if self.dim[0] >= self.dim[1]:
-                    self.val = 1e-8 * np.eye(self.dim[0])
+                    self.val = np.eye(self.dim[0])
                     self.val = self.val[:, :self.dim[1]]
                 elif self.dim[0] >= self.dim[1]:
-                    self.val = 1e-8 * np.eye(self.dim[1])
+                    self.val = np.eye(self.dim[1])
                     self.val = self.val[:self.dim[0], :]
     
     def update(self, yyH: np.ndarray):
@@ -423,16 +423,18 @@ class Run:
             (BFtype, np.random.randn(c.Mk, c.Qd))
             for BFtype in DANSElikealgos
         ]) for _ in range(c.K)]
-        # DANSE filter \tilde{W}_k
-        tWk = [
-            np.random.randn(c.Mk + c.Qd * (c.K - 1), c.Qd)
-            for _ in range(c.K)
-        ]
-        # TI-DANSE filter \tilde{W}_k
-        tWkTI = [
-            np.random.randn(c.Mk + c.Qd, c.Qd)
-            for _ in range(c.K)
-        ]
+        # Estimation filters \tilde{W}_k
+        def tilde_filter_init(algo, k):
+            if algo == 'DANSE':
+                dims = (c.Mk + c.Qd * (c.K - 1), c.Qd)
+            elif algo == 'TI-DANSE':
+                dims = (c.Mk + c.Qd, c.Qd)
+            else:
+                dims = (c.Mk + int(np.sum(QkqMat[k, :]) - QkqMat[k, k]), c.Qd)
+            return (algo, np.random.randn(*dims))
+        tWk = [dict([
+            tilde_filter_init(BFtype, k) for BFtype in allDistAlgos
+        ]) for k in range(c.K)]
         # SCMs
         Ryy = SCM(dim=c.M, beta=c.beta)
         Rss = copy.deepcopy(Ryy)
@@ -457,7 +459,6 @@ class Run:
         Rts = copy.deepcopy(Rty)
         Rtn = copy.deepcopy(Rty)
         Rykyk = [SCM(dim=c.Mk, beta=c.beta) for _ in range(c.K)]
-        Rsksk = copy.deepcopy(Rykyk)
         Rykyqb = [
             [SCM(dim=(c.Mk, QkqMat[k, q]), beta=c.beta) for q in range(c.K)]
             for k in range(c.K)
@@ -475,6 +476,7 @@ class Run:
         ])
 
         u = 0  # updating node index DANSE
+        i = 0  # iteration index
         
         for l in range(c.nFrames):
             print(f"Frame {l + 1}/{c.nFrames}...", end='\r')
@@ -495,10 +497,6 @@ class Run:
                 Lam = np.linalg.inv(Rykyk[k].val)
             
                 # DANSE-like algo processing (not neighbor-specific)
-                if l % c.upEvery == 0:
-                    Pk[k]['DANSE'] = tWk[k][:c.Mk, :]
-                    # Pk[k]['TI-DANSE'] = tWkTI[k][:c.Mk, :] @\
-                    #     np.linalg.inv(tWkTI[k][c.Mk:, :])
                 for BFtype in DANSElikealgos:
                     zk[BFtype]['y'][k] = Pk[k][BFtype].T @ y[k]
                     zk[BFtype]['s'][k] = Pk[k][BFtype].T @ s[k]
@@ -540,6 +538,7 @@ class Run:
                 for BFtype in allAlgos
             ])
 
+            # Compute estimation SCMs, filters, and desired signal estimates
             for k in range(c.K):
                 for BFtype in allDistAlgos:
                     RtyCurr = Rty[BFtype][k]
@@ -558,28 +557,38 @@ class Run:
                         RtyCurr.update(_inner(ty))
                         RtsCurr.update(_inner(ts))
                         RtnCurr.update(_inner(tn))
-                    # Filter update
-                    if fullrank(RtyCurr.val):
-                        tWkFull = filtup(
-                            RtyCurr.val,
-                            RtnCurr.val,
-                            gevd=c.gevd if BFtype in DANSElikealgos else False,  # TODO: addess dMWF and iDANSE formulation for GEVD...
-                            gevdRank=c.Qd
-                        )
+                    
+                    def _full_filtup():
+                        # Filter update
+                        if fullrank(RtyCurr.val):
+                            tWkFull = filtup(
+                                RtyCurr.val,
+                                RtnCurr.val,
+                                gevd=c.gevd if BFtype in DANSElikealgos else False,  # TODO: addess dMWF and iDANSE formulation for GEVD...
+                                gevdRank=c.Qd
+                            )
+                        else:
+                            tWkFull = np.eye(RtyCurr.val.shape[0])
+                        tE = np.zeros((RtyCurr.val.shape[0], c.Qd))
+                        tE[:c.Qd, :] = np.eye(c.Qd)
+                        tWk[k][BFtype] = tWkFull @ tE
+
+                    if BFtype in DANSElikealgos:
+                        if k == u and l % c.upEvery == 0:
+                            _full_filtup()
+                            # Update the fusion matrices for DANSE-like algorithms
+                            if BFtype == 'DANSE':
+                                Pk[k][BFtype] = tWk[k][BFtype][:c.Mk, :]
+                            if BFtype == 'TI-DANSE':
+                                Pk[k][BFtype] = tWk[k][BFtype][:c.Mk, :] @\
+                                    np.linalg.inv(tWk[k][BFtype][c.Mk:, :])
+                            i += 1
+                            print(f"\nIteration {i}... ({BFtype} up. node {u + 1})")
                     else:
-                        tWkFull = np.eye(RtyCurr.val.shape[0])
-                    tE = np.zeros((RtyCurr.val.shape[0], c.D))
-                    tE[:c.D, :] = np.eye(c.D)
-                    tWkCurr = tWkFull @ tE
-                    if k == u and l % c.upEvery == 0:
-                        tE2 = np.zeros((RtyCurr.val.shape[0], c.Qd))
-                        tE2[:c.Qd, :] = np.eye(c.Qd)
-                        if BFtype == 'DANSE':
-                            tWk[k] = tWkFull @ tE2  # store for DANSE fusion
-                        if BFtype == 'TI-DANSE':
-                            tWkTI[k] = tWkFull @ tE2  # store for TI-DANSE fusion
+                        _full_filtup()
+
                     # Compute target signal estimate
-                    dhatk[BFtype][k] = tWkCurr.T @ ty
+                    dhatk[BFtype][k] = tWk[k][BFtype][:, :c.D].T @ ty
 
             # Compute centralized and local MWFs
             yc = np.concatenate(y, axis=0)
@@ -643,9 +652,9 @@ class Run:
                     np.mean(dh[k] - d[k]) ** 2
                     for k in range(c.K)
                 ]
-
+            
             if l % c.upEvery == 0:
-                u = (u + 1) % c.K  # update node index for DANSE
+                u = (u + 1) % c.K  # update node index for DANSE-like algorithms
 
         return msed
         

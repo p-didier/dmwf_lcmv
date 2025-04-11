@@ -5,20 +5,20 @@ D: 1      # number of target signal channels at every node
 Qd: 1     # number of desired sources in environment
 Qn: 1     # number of noise sources in environment
 Nbatch: 10000    # number of samples for batch processing
-Nonline: 100    # number of samples for online processing (frame length)
-nFrames: 200    # number of time frames (only for online processing)
-upEvery: 1    # number of time frames between consecutive updates of the fusion matrices (only for online processing)
-beta: 0.95    # exponential averaging factor (only for online processing)
+Nonline: 1    # number of samples for online processing (frame length)
+nFrames: 1500    # number of time frames (only for online processing)
+upEvery: 50    # number of time frames between consecutive updates of the fusion matrices (only for online processing)
+beta: 0.99    # exponential averaging factor (only for online processing)
 # Type of SCM estimation method ('theoretical' or 'batch')
 # scmEst: theoretical
 # scmEst: batch
 scmEst: online
-# upScmEveryNode: True
-upScmEveryNode: False
+upScmEveryNode: True
+# upScmEveryNode: False
 foss: True    # if True, ensure fully overlapping source observability 
 # foss: False    # if True, ensure fully overlapping source observability 
 gevd: True    # if True, use GEVD
 
 seed: 42  # random number generator seed (for 1st MC run)
-suffix: _justUpnode_foss  # suffix for export file name
+suffix: _baseline_wolaDANSE_mimic  # suffix for export file name
 # suffix: _allNodes_poss  # suffix for export file name
