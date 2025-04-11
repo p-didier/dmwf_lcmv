@@ -145,8 +145,8 @@ class Run:
         y = [s[k] + n[k] for k in range(c.K)]  # microphone signals
         return y, s, d, n, latd, latn
         
-    def build_tilde(self, yk, zkqCurr, kCurr):
-        """Build \\tilde{y}_k (DANSE or dMWF)."""
+    def build_tilde_dmwf(self, yk, zkqCurr, kCurr):
+        """Build \\tilde{y}_k (dMWF or iDANSE)."""
         zmk = np.concatenate(
             [
                 zkqCurr[q][kCurr]
@@ -157,11 +157,15 @@ class Run:
         )
         return np.concatenate([yk, zmk], axis=0)
     
-    def build_tilde_ti(self, yk, zkqCurr, kCurr):
-        """Build \\tilde{y}_k (TI-DANSE)."""
-        zmk = np.sum(
+    def build_tilde_danse(self, yk, zqCurr, kCurr, ti=False):
+        """Build \\tilde{y}_k (DANSE or TI-DANSE)."""
+        if ti:
+            fct = np.sum
+        else:
+            fct = np.concatenate
+        zmk = fct(
             [
-                zkqCurr[q][kCurr]
+                zqCurr[q]
                 for q in range(self.cfg.K)
                 if q != kCurr
             ],
@@ -302,8 +306,8 @@ class Run:
 
         for k in range(c.K):
             for BFtype in zkq.keys():
-                ty = self.build_tilde(y[k], zkq[BFtype]['y'], k)
-                ts = self.build_tilde(s[k], zkq[BFtype]['s'], k)
+                ty = self.build_tilde_dmwf(y[k], zkq[BFtype]['y'], k)
+                ts = self.build_tilde_dmwf(s[k], zkq[BFtype]['s'], k)
                 if c.scmEst == 'theoretical':
                     Ck = self.build_Ck(k, [
                         Pkq[k][q][BFtype]
@@ -377,46 +381,64 @@ class Run:
 
         # Fusion matrices and fused signals via LCMV beamforming or from the
         # dMWF basic definition (local MWFs)
+        def _gen_baselist(danse=False):
+            return [
+                [
+                    np.random.randn(QkqMat[k, q], c.Nonline)
+                    if not danse else
+                    np.random.randn(c.Qd, c.Nonline)
+                    for q in range(c.K)
+                ]
+                for k in range(c.K)
+            ]
         baseDict = {
-            'y': [
-                [np.random.randn(QkqMat[k, q], c.Nonline) for q in range(c.K)]
-                for k in range(c.K)
-            ],
-            's': [
-                [np.random.randn(QkqMat[k, q], c.Nonline) for q in range(c.K)]
-                for k in range(c.K)
-            ],
-            'n': [
-                [np.random.randn(QkqMat[k, q], c.Nonline) for q in range(c.K)]
-                for k in range(c.K)
-            ],
+            'y': _gen_baselist(),
+            's': _gen_baselist(),
+            'n': _gen_baselist(),
+        }
+        baseDictDANSE = {
+            'y': _gen_baselist(danse=True),
+            's': _gen_baselist(danse=True),
+            'n': _gen_baselist(danse=True),
         }
         zkq = {
             'dMWF': copy.deepcopy(baseDict),
             'iDANSE': copy.deepcopy(baseDict),
-            'DANSE': copy.deepcopy(baseDict),
-            # 'TI-DANSE': copy.deepcopy(baseDict),
         }
+        zk = {
+            'DANSE': copy.deepcopy(baseDictDANSE),
+            # 'TI-DANSE': copy.deepcopy(baseDictDANSE),
+        }
+        DANSElikealgos = list(zk.keys())
+        dMWFlikealgos = list(zkq.keys())
+        allDistAlgos = DANSElikealgos + dMWFlikealgos
+        # Node-pair-specific fusion matrices (for all
+        # but DANSE-like algorithms)
         Pkq = [[dict([
             (BFtype, np.random.randn(c.Mk, QkqMat[k, q]))
-            if 'DANSE' not in BFtype else
-            (BFtype, np.random.randn(c.Mk, c.Qd))
-            for BFtype in zkq.keys()
+            for BFtype in dMWFlikealgos
         ]) for q in range(c.K)] for k in range(c.K)]
-        tWk = [  # DANSE filter \tilde{W}_k
+        # DANSE-like fusion matrices, one per node
+        Pk = [dict([
+            (BFtype, np.random.randn(c.Mk, c.Qd))
+            for BFtype in DANSElikealgos
+        ]) for _ in range(c.K)]
+        # DANSE filter \tilde{W}_k
+        tWk = [
             np.random.randn(c.Mk + c.Qd * (c.K - 1), c.Qd)
             for _ in range(c.K)
         ]
-        tWkTI = [  # TI-DANSE filter \tilde{W}_k
+        # TI-DANSE filter \tilde{W}_k
+        tWkTI = [
             np.random.randn(c.Mk + c.Qd, c.Qd)
             for _ in range(c.K)
         ]
-        # SCMs initialization
+        # SCMs
         Ryy = SCM(dim=c.M, beta=c.beta)
         Rss = copy.deepcopy(Ryy)
         Rnn = copy.deepcopy(Ryy)
         Rty = dict()
-        for BFtype in zkq.keys():
+        for BFtype in allDistAlgos:
             if BFtype == 'DANSE':
                 Rty[BFtype] = [
                     SCM(dim=c.Mk + c.Qd * (c.K - 1), beta=c.beta)
@@ -447,7 +469,7 @@ class Run:
                 x2 = x1
             return x1 @ x2.T / c.Nonline
         
-        allAlgos = list(zkq.keys()) + ['Centralized', 'Local', 'Unprocessed']
+        allAlgos = allDistAlgos + ['Centralized', 'Local', 'Unprocessed']
         msed = dict([
             (BFtype, np.zeros((c.nFrames, c.K))) for BFtype in allAlgos
         ])
@@ -471,6 +493,16 @@ class Run:
                     Rykyk[k].update(_inner(y[k]))
                 
                 Lam = np.linalg.inv(Rykyk[k].val)
+            
+                # DANSE-like algo processing (not neighbor-specific)
+                if l % c.upEvery == 0:
+                    Pk[k]['DANSE'] = tWk[k][:c.Mk, :]
+                    # Pk[k]['TI-DANSE'] = tWkTI[k][:c.Mk, :] @\
+                    #     np.linalg.inv(tWkTI[k][c.Mk:, :])
+                for BFtype in DANSElikealgos:
+                    zk[BFtype]['y'][k] = Pk[k][BFtype].T @ y[k]
+                    zk[BFtype]['s'][k] = Pk[k][BFtype].T @ s[k]
+                    zk[BFtype]['n'][k] = Pk[k][BFtype].T @ n[k]
 
                 for q in range(c.K):
                     if q == k:
@@ -488,9 +520,6 @@ class Run:
 
                     if l % c.upEvery == 0:
                         Pkq[k][q]['dMWF'] = Lam @ Rykyqb[k][q].val
-                        Pkq[k][q]['DANSE'] = tWk[k][:c.Mk, :]
-                        # Pkq[k][q]['TI-DANSE'] = tWkTI[k][:c.Mk, :] @\
-                        #     np.linalg.inv(tWkTI[k][c.Mk:, :])
 
                     # --- dMWF original definition ---
                     if c.upScmEveryNode or k == u:
@@ -499,9 +528,8 @@ class Run:
                     Ekloc[:Qkq, :] = np.eye(Qkq)
                     Pkq[k][q]['iDANSE'] = Lam @ Rgkq[k][q].val @ Ekloc # (Mk x Qkq)
                     
-                    pass
                     # Fused signals
-                    for BFtype in zkq.keys():
+                    for BFtype in dMWFlikealgos:
                         zkq[BFtype]['y'][k][q] = Pkq[k][q][BFtype].T @ y[k]
                         zkq[BFtype]['s'][k][q] = Pkq[k][q][BFtype].T @ s[k]
                         zkq[BFtype]['n'][k][q] = Pkq[k][q][BFtype].T @ n[k]
@@ -513,18 +541,18 @@ class Run:
             ])
 
             for k in range(c.K):
-                for BFtype in zkq.keys():
+                for BFtype in allDistAlgos:
                     RtyCurr = Rty[BFtype][k]
                     RtsCurr = Rts[BFtype][k]
                     RtnCurr = Rtn[BFtype][k]
-                    if BFtype == 'TI-DANSE':
-                        ty = self.build_tilde_ti(y[k], zkq[BFtype]['y'], k)
-                        ts = self.build_tilde_ti(s[k], zkq[BFtype]['s'], k)
-                        tn = self.build_tilde_ti(n[k], zkq[BFtype]['n'], k)
+                    if BFtype in DANSElikealgos:
+                        ty = self.build_tilde_danse(y[k], zk[BFtype]['y'], k)
+                        ts = self.build_tilde_danse(s[k], zk[BFtype]['s'], k)
+                        tn = self.build_tilde_danse(n[k], zk[BFtype]['n'], k)
                     else:
-                        ty = self.build_tilde(y[k], zkq[BFtype]['y'], k)
-                        ts = self.build_tilde(s[k], zkq[BFtype]['s'], k)
-                        tn = self.build_tilde(n[k], zkq[BFtype]['n'], k)
+                        ty = self.build_tilde_dmwf(y[k], zkq[BFtype]['y'], k)
+                        ts = self.build_tilde_dmwf(s[k], zkq[BFtype]['s'], k)
+                        tn = self.build_tilde_dmwf(n[k], zkq[BFtype]['n'], k)
                     # Update the tilde SCMs
                     if c.upScmEveryNode or k == u:
                         RtyCurr.update(_inner(ty))
@@ -535,7 +563,7 @@ class Run:
                         tWkFull = filtup(
                             RtyCurr.val,
                             RtnCurr.val,
-                            gevd=c.gevd if BFtype not in ['dMWF', 'iDANSE'] else False,  # TODO: addess dMWF and iDANSE formulation for GEVD...
+                            gevd=c.gevd if BFtype in DANSElikealgos else False,  # TODO: addess dMWF and iDANSE formulation for GEVD...
                             gevdRank=c.Qd
                         )
                     else:

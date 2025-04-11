@@ -21,7 +21,7 @@ class Parameters:
     nFrames: int = int(1e2)    # number of time frames (only for online processing)
     upEvery: int = 1    # number of time frames between consecutive updates of the fusion matrices (only for online processing)
     beta: float = 0.995    # exponential averaging factor (only for online processing)
-    scmEst: str = 'theoretical'    # type of SCM estimation method ('theoretical', 'batch', or 'online')
+    scmEst: str = 'online'    # type of SCM estimation method ('theoretical', 'batch', or 'online')
     upScmEveryNode: bool = True    # if True, update the SCM estimate at every node at each iteration (used iff `scmEst == 'online'`)
     foss: bool = True    # if True, ensure fully overlapping source observability 
     gevd: bool = True    # if True, use GEVD
@@ -34,6 +34,9 @@ class Parameters:
         np.random.seed(self.seed)
         self.M = self.Mk * self.K
         assert self.Mk >= self.Qd + self.Qn, "Number of sensors per node must be greater than number of sources."
+
+        if self.scmEst != 'online':
+            raise NotImplementedError("Only 'online' SCM estimation is correctly implemented at the moment.")
 
     def load_from_yaml(self, path: str):
         """Load parameters from a YAML file."""
