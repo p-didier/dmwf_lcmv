@@ -23,8 +23,17 @@ pathToData = f'{Path(__file__).parent}/out/data/'
 DATA_FILE = f'{pathToData}/run_20250401_093538_batch.pkl'
 DATA_FILE = f'{pathToData}/run_20250401_094835_online.pkl'
 DATA_FILE = f'{pathToData}/run_20250410_112428_allNodes.pkl'
-DATA_FILE = f'{pathToData}/run_20250410_113720_justUpnode_foss.pkl'
+DATA_FILE = f'{pathToData}/run_20250411_120452_baseline_wolaDANSE_mimic_100iter.pkl'
+# DATA_FILE = f'{pathToData}/run_20250411_125946_saa_upSCMsOnlyUpNode.pkl'
 
+ORDER = {
+    'Unprocessed': 'Unprocessed',
+    'Local': 'Local MWF',
+    'Centralized': 'Centralized',
+    # 'iDANSE': 'iDANSE as in [1]',
+    # 'dMWF': 'dMWF with proposed fusion',
+    'DANSE': 'DANSE (sequential)',
+}
 
 PALETTE = mypalettes.get_palette('seabed')
 
@@ -60,22 +69,12 @@ def discretized_palette(palette, n_colors):
 def plot_online(msed):
     """Online-mode run plot: line plot."""
     # Select len(msed[0].keys()) equally spaced colors from the palette
-    paletteCurr = discretized_palette(PALETTE, len(msed[0].keys()))
+    paletteCurr = discretized_palette(PALETTE, len(ORDER))
     markers = ['o', 's', '^', 'D', 'x', 'v', 'p', '*']
-
-    order = {
-        'Unprocessed': 'Unprocessed',
-        'Local': 'Local MWF',
-        'dMWF': 'dMWF as in [1]',
-        # 'LCMV',
-        'Simple': 'dMWF with proposed fusion',
-        'DANSE': 'DANSE (sequential)',
-        'Centralized': 'Centralized'
-    }
 
     fig, axes = plt.subplots(1, 1)
     fig.set_size_inches(7, 3.5)
-    for ii, BFtype in enumerate(order.keys()):
+    for ii, BFtype in enumerate(ORDER.keys()):
         # Data
         data = np.mean(
             np.array([msed[jj][BFtype] for jj in range(len(msed))]),
@@ -92,7 +91,7 @@ def plot_online(msed):
             col = 'k'
         axes.plot(
             m,
-            label=order[BFtype],
+            label=ORDER[BFtype],
             color=col,
             marker=markers[ii % len(markers)],
             markersize=5,

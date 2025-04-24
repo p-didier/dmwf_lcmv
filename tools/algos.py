@@ -406,7 +406,7 @@ class Run:
             'iDANSE': copy.deepcopy(baseDict),
         }
         zk = {
-            'DANSE': copy.deepcopy(baseDictDANSE),
+            # 'DANSE': copy.deepcopy(baseDictDANSE),
             # 'TI-DANSE': copy.deepcopy(baseDictDANSE),
         }
         DANSElikealgos = list(zk.keys())
