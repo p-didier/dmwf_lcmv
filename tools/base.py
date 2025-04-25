@@ -35,8 +35,8 @@ class Parameters:
         self.M = self.Mk * self.K
         assert self.Mk >= self.Qd + self.Qn, "Number of sensors per node must be greater than number of sources."
 
-        if self.scmEst != 'online':
-            raise NotImplementedError("Only 'online' SCM estimation is correctly implemented at the moment.")
+        # if self.scmEst != 'online':
+        #     raise NotImplementedError("Only 'online' SCM estimation is correctly implemented at the moment.")
 
     def load_from_yaml(self, path: str):
         """Load parameters from a YAML file."""

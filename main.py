@@ -33,9 +33,6 @@ def main():
     cfg.load_from_yaml(PATH_TO_CFG)
 
     np.random.seed(cfg.seed)
-    
-    # profiler = Profiler()
-    # profiler.start()
 
     msed = []
     t0 = time.time()

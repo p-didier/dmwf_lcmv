@@ -22,13 +22,13 @@ class SCM:
             if isinstance(self.dim, int) or len(self.dim) == 1:
                 if isinstance(self.dim, tuple):
                     self.dim = list(self.dim)[0]
-                self.val = np.eye(self.dim)
+                self.val = 1e-8 * np.eye(self.dim)
             else:
                 if self.dim[0] >= self.dim[1]:
-                    self.val = np.eye(self.dim[0])
+                    self.val = 1e-8 * np.eye(self.dim[0])
                     self.val = self.val[:, :self.dim[1]]
                 elif self.dim[0] >= self.dim[1]:
-                    self.val = np.eye(self.dim[1])
+                    self.val = 1e-8 * np.eye(self.dim[1])
                     self.val = self.val[:self.dim[0], :]
     
     def update(self, yyH: np.ndarray):
@@ -239,12 +239,11 @@ class Run:
 
         # Compute signals at once
         Amat, Bmat = self._get_steering_matrices(oMatd, oMatn)
-        y, s, d, n, latd, latn =\
-            self._get_latent_sigs(
-                nSamples=c.Nbatch,
-                Amat=Amat,
-                Bmat=Bmat
-            )
+        y, s, d, n, latd, latn = self._get_latent_sigs(
+            nSamples=c.Nbatch,
+            Amat=Amat,
+            Bmat=Bmat
+        )
 
         # Fusion matrices and fused signals via LCMV beamforming or from the
         # dMWF basic definition (local MWFs)
@@ -289,10 +288,8 @@ class Run:
                     Rgkq = gkq @ gkq.T / c.Nbatch
                 Ekloc = np.zeros((c.Mk, Qkq))
                 Ekloc[:Qkq, :] = np.eye(Qkq)
-                Pkq[k][q]['iDANSE'] = np.linalg.inv(Rykyk) @\
-                    Rgkq @ Ekloc # (Mk x Qkq)
+                Pkq[k][q]['iDANSE'] = np.linalg.inv(Rykyk) @ Rgkq @ Ekloc # (Mk x Qkq)
                 
-                pass
                 # Fused signals
                 for BFtype in zkq.keys():
                     zkq[BFtype]['y'][k][q] = Pkq[k][q][BFtype].T @ y[k]
@@ -403,6 +400,7 @@ class Run:
         }
         zkq = {
             'dMWF': copy.deepcopy(baseDict),
+            'dMWF_iter': copy.deepcopy(baseDict),
             'iDANSE': copy.deepcopy(baseDict),
         }
         zk = {
@@ -463,6 +461,7 @@ class Run:
             [SCM(dim=(c.Mk, QkqMat[k, q]), beta=c.beta) for q in range(c.K)]
             for k in range(c.K)
         ]
+        Rykzqtk = copy.deepcopy(Rykyqb)
         Rgkq = [copy.deepcopy(Rykyk) for _ in range(c.K)]
 
         def _inner(x1, x2=None):
@@ -494,7 +493,7 @@ class Run:
                 if c.upScmEveryNode or k == u:
                     Rykyk[k].update(_inner(y[k]))
                 
-                Lam = np.linalg.inv(Rykyk[k].val)
+                Rykykinv = np.linalg.inv(Rykyk[k].val)
             
                 # DANSE-like algo processing (not neighbor-specific)
                 for BFtype in DANSElikealgos:
@@ -510,21 +509,22 @@ class Run:
                     if c.upScmEveryNode or k == u:
                         yqb = y[q][:Qkq, :]  # signal transmitted by q to k (Qkq x N)
                         Rykyqb[k][q].update(_inner(y[k], yqb))
+                        Rykzqtk[k][q].update(_inner(y[k], zkq['dMWF_iter']['y'][q][k]))
 
                     # Update the k SCM of all contributions _but_ those of
                     # the common sources between k and q
                     gkq = get_gkq(k, q, Amat, Bmat, latd, latn, oMatd, oMatn)
                     # Rykykmq[k][q].update(_inner(y[k] - gkq))
 
-                    if l % c.upEvery == 0:
-                        Pkq[k][q]['dMWF'] = Lam @ Rykyqb[k][q].val
+                    Pkq[k][q]['dMWF'] = Rykykinv @ Rykyqb[k][q].val
+                    Pkq[k][q]['dMWF_iter'] = Rykykinv @ Rykzqtk[k][q].val
 
                     # --- dMWF original definition ---
                     if c.upScmEveryNode or k == u:
                         Rgkq[k][q].update(_inner(gkq))
                     Ekloc = np.zeros((c.Mk, Qkq))
                     Ekloc[:Qkq, :] = np.eye(Qkq)
-                    Pkq[k][q]['iDANSE'] = Lam @ Rgkq[k][q].val @ Ekloc # (Mk x Qkq)
+                    Pkq[k][q]['iDANSE'] = Rykykinv @ Rgkq[k][q].val @ Ekloc # (Mk x Qkq)
                     
                     # Fused signals
                     for BFtype in dMWFlikealgos:
